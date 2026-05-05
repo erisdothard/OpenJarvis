@@ -349,11 +349,15 @@ class GmailConnector(BaseConnector):
         if not token:
             return
 
-        query = "category:primary"
+        # Default to no filter so SENT, labeled, and category-tabbed mail
+        # all flow in. The previous "category:primary" default excluded
+        # ~95% of a typical mailbox (sent mail, Promotions, Updates, etc.)
+        # which made any C2-style "what did I say to X" query impossible.
+        query_parts: List[str] = []
         if since is not None:
             # Gmail's after: operator accepts Unix epoch seconds.
-            epoch = int(since.timestamp())
-            query = f"category:primary after:{epoch}"
+            query_parts.append(f"after:{int(since.timestamp())}")
+        query = " ".join(query_parts)
 
         page_token: Optional[str] = cursor
         synced = 0

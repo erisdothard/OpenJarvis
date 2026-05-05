@@ -226,7 +226,8 @@ def test_sync_passes_since_as_query(
     # Verify the epoch value is correct
     expected_epoch = int(since_dt.timestamp())
     assert f"after:{expected_epoch}" in call_kwargs["query"]
-    assert "category:primary" in call_kwargs["query"]
+    # No category filter — sent mail and all Gmail tabs should be reachable.
+    assert "category:" not in call_kwargs["query"]
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +253,8 @@ def test_sync_without_since_passes_empty_query(
 
     mock_list.assert_called_once()
     _, call_kwargs = mock_list.call_args
-    assert call_kwargs.get("query", "") == "category:primary"
+    # No since= and no hardcoded category filter → empty query.
+    assert call_kwargs.get("query", "") == ""
 
 
 # ---------------------------------------------------------------------------
