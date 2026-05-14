@@ -404,3 +404,60 @@ def test_last_synced_set_at_ingest(
     ).fetchall()
     assert len(rows) == 1
     assert before <= rows[0][0] <= after
+
+
+# ---------------------------------------------------------------------------
+# Embedding wire-up
+# ---------------------------------------------------------------------------
+
+
+class _StubEmbedder:
+    """Deterministic in-test embedder that mimics the OllamaEmbedder surface."""
+
+    model_version = "stub:test-embedder"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def embed(self, text: str):  # type: ignore[no-untyped-def]
+        import numpy as _np
+        self.calls += 1
+        # Map content to a stable 4-d float32 vector for assertion convenience.
+        h = abs(hash(text)) % 10_000
+        return _np.asarray([h, h + 1, h + 2, h + 3], dtype=_np.float32).tobytes()
+
+
+def test_pipeline_populates_embedding_when_embedder_provided(
+    store: KnowledgeStore,
+) -> None:
+    """Pipeline writes float32 embedding bytes + model_version when embedder is set."""
+    import numpy as _np
+
+    embedder = _StubEmbedder()
+    pipeline = IngestionPipeline(store, embedder=embedder)
+    pipeline.ingest([_make_doc(doc_id="doc:emb:1", content="Short embeddable text.")])
+
+    rows = store._conn.execute(
+        "SELECT embedding, embedding_model_version FROM knowledge_chunks"
+    ).fetchall()
+    assert len(rows) == 1
+    blob, version = rows[0]
+    assert blob is not None
+    arr = _np.frombuffer(blob, dtype=_np.float32)
+    assert arr.shape == (4,)
+    assert version == "stub:test-embedder"
+    assert embedder.calls == 1
+
+
+def test_pipeline_skips_embedding_when_no_embedder(
+    pipeline: IngestionPipeline, store: KnowledgeStore,
+) -> None:
+    """Default pipeline leaves embedding NULL and embedding_model_version empty."""
+    pipeline.ingest([_make_doc(doc_id="doc:emb:none", content="No embedder configured.")])
+
+    rows = store._conn.execute(
+        "SELECT embedding, embedding_model_version FROM knowledge_chunks"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] is None
+    assert rows[0][1] == ""

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Iterable, Optional
 
 from openjarvis.connectors._stubs import Attachment, Document
 from openjarvis.connectors.chunker import SemanticChunker
+from openjarvis.connectors.embeddings import OllamaEmbedder
 from openjarvis.connectors.store import KnowledgeStore
 
 
@@ -72,6 +73,12 @@ class IngestionPipeline:
         Optional ``AttachmentStore`` for persisting attachment blobs and
         extracting text from supported MIME types (PDF, plain text, etc.).
         When ``None`` (default) attachments are silently ignored.
+    embedder:
+        Optional embedding client (e.g. ``OllamaEmbedder``). When provided,
+        every chunk is embedded at ingest time and the resulting float32
+        vector is written to the ``embedding`` BLOB column alongside
+        ``embedding_model_version``. ``None`` (default) skips embedding so
+        in-memory tests and offline runs don't depend on a sidecar daemon.
     """
 
     def __init__(
@@ -80,10 +87,12 @@ class IngestionPipeline:
         *,
         max_tokens: int = 512,
         attachment_store: Optional[AttachmentStore] = None,
+        embedder: Optional[OllamaEmbedder] = None,
     ) -> None:
         self._store = store
         self._chunker = SemanticChunker(max_tokens=max_tokens)
         self._attachment_store = attachment_store
+        self._embedder = embedder
         self._seen_doc_ids: set[str] = set()
         self._load_existing_doc_ids()
 
@@ -97,6 +106,20 @@ class IngestionPipeline:
             "SELECT DISTINCT doc_id FROM knowledge_chunks"
         ).fetchall()
         self._seen_doc_ids = {r[0] for r in rows}
+
+    def _embed_chunk(self, content: str) -> tuple[Optional[bytes], str]:
+        """Return ``(embedding_bytes, model_version)`` for a chunk.
+
+        Returns ``(None, "")`` when no embedder is configured or the embedder
+        fails — ingestion continues with the lexical-only row, so a flaky
+        local daemon never blocks a sync.
+        """
+        if self._embedder is None:
+            return None, ""
+        emb = self._embedder.embed(content)
+        if emb is None:
+            return None, ""
+        return emb, self._embedder.model_version
 
     def _extract_attachment_text(self, att: Attachment) -> str:
         """Extract text from an attachment.
@@ -180,6 +203,7 @@ class IngestionPipeline:
             )
 
             for chunk in chunks:
+                embedding_bytes, embedding_version = self._embed_chunk(chunk.content)
                 self._store.store(
                     content=chunk.content,
                     source=doc.source,
@@ -197,6 +221,8 @@ class IngestionPipeline:
                     metadata=chunk.metadata,
                     chunk_index=chunk.index,
                     content_hash=_content_hash(chunk.content),
+                    embedding=embedding_bytes,
+                    embedding_model_version=embedding_version,
                     last_synced=ingest_epoch,
                 )
                 chunks_stored += 1
@@ -233,6 +259,7 @@ class IngestionPipeline:
                         # a parent doc_id for dedup and blob linkage.
                         att_source_id = f"{source_id}#{att.filename}"
                         for chunk in att_chunks:
+                            embedding_bytes, embedding_version = self._embed_chunk(chunk.content)
                             self._store.store(
                                 content=chunk.content,
                                 source=doc.source,
@@ -250,6 +277,8 @@ class IngestionPipeline:
                                 metadata=chunk.metadata,
                                 chunk_index=chunk.index,
                                 content_hash=_content_hash(chunk.content),
+                                embedding=embedding_bytes,
+                                embedding_model_version=embedding_version,
                                 last_synced=ingest_epoch,
                             )
                             chunks_stored += 1

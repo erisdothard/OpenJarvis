@@ -9,11 +9,14 @@ contacts leaderboard, and six canned retrieval queries.
 What it exercises:
   - GmailConnector → IngestionPipeline → KnowledgeStore end-to-end
   - Every v1 field: source_id, participants_raw, channel, content_hash,
-    namespaced thread_id, last_synced
+    namespaced thread_id, last_synced, embedding, embedding_model_version
   - BM25 lexical retrieval with source/channel/timestamp filters
+  - Dense-embedding sanity: coverage, fixed dimensionality, and intra-thread
+    cosine similarity above the random-pair baseline
 
 What it does NOT exercise (deferred):
-  - Vector retrieval (embedding column is write-only on this branch)
+  - Vector retrieval at query time (embeddings are populated but the
+    retrieve() path is still BM25-only)
   - Lexical search over participants_raw (FTS5 hasn't been rebuilt to
     include it)
 
@@ -46,9 +49,16 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from openjarvis.connectors._stubs import Document  # noqa: E402
+from openjarvis.connectors.embeddings import (  # noqa: E402
+    DEFAULT_EMBED_MODEL,
+    OllamaEmbedder,
+    decode_embedding,
+)
 from openjarvis.connectors.gmail import GmailConnector  # noqa: E402
 from openjarvis.connectors.pipeline import IngestionPipeline  # noqa: E402
 from openjarvis.connectors.store import KnowledgeStore  # noqa: E402
+
+import numpy as np  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Detectors for chunk-quality signals
@@ -327,6 +337,120 @@ def section_people_leaderboard(conn: sqlite3.Connection, top_n: int = 20) -> str
     ) + "\n"
 
 
+def section_embedding_health(
+    conn: sqlite3.Connection, embed_model: str, sample_pairs: int = 200
+) -> str:
+    """Coverage + dimensionality + cosine sanity check on stored embeddings.
+
+    Cosine sanity: chunks sharing a ``thread_id`` are, by construction, from
+    the same email conversation and almost always semantically related. The
+    mean cosine of intra-thread pairs should sit comfortably above the mean
+    cosine of cross-thread pairs sampled at random. If it doesn't, something
+    is wrong with how embeddings are being generated or stored.
+    """
+    total = conn.execute(
+        "SELECT COUNT(*) FROM knowledge_chunks WHERE deleted_at IS NULL"
+    ).fetchone()[0]
+    rows = conn.execute(
+        """
+        SELECT id, thread_id, embedding, embedding_model_version
+        FROM knowledge_chunks
+        WHERE deleted_at IS NULL
+        """
+    ).fetchall()
+
+    populated = [r for r in rows if r[2] is not None]
+    versions: Counter[str] = Counter(r[3] for r in populated)
+    dims: Counter[int] = Counter()
+    vectors: List[Tuple[str, str, np.ndarray]] = []
+    for cid, tid, blob, _ver in populated:
+        vec = decode_embedding(blob)
+        if vec is None or vec.size == 0:
+            continue
+        dims[int(vec.shape[0])] += 1
+        # L2-normalise once so cosine reduces to a dot product.
+        norm = float(np.linalg.norm(vec))
+        if norm == 0.0:
+            continue
+        vectors.append((cid, tid or "", vec / norm))
+
+    coverage_pct = _pct(len(populated), total)
+    unique_dims = sorted(dims.keys())
+    dim_str = ", ".join(f"{d} ({dims[d]} rows)" for d in unique_dims) or "n/a"
+    version_str = ", ".join(f"{v} ({n})" for v, n in versions.most_common()) or "n/a"
+
+    summary_rows = [
+        ["chunks with embedding", len(populated), coverage_pct, "want 100%"],
+        ["distinct dimensionality", len(unique_dims), dim_str, "want exactly 1"],
+        ["embedding_model_version values", len(versions), version_str, "want exactly 1"],
+    ]
+    summary = _table(["signal", "count", "detail", "expected"], summary_rows)
+
+    # Cosine sanity check — same-thread vs cross-thread pairs.
+    import random
+
+    rng = random.Random(0xDA61FF00D)
+    by_thread: Dict[str, List[int]] = {}
+    for idx, (_cid, tid, _vec) in enumerate(vectors):
+        if tid:
+            by_thread.setdefault(tid, []).append(idx)
+    multi = [idxs for idxs in by_thread.values() if len(idxs) >= 2]
+
+    cosine_block = "\n### Cosine similarity sanity (same-thread vs cross-thread)\n"
+    if not multi or len(vectors) < 2:
+        cosine_block += (
+            "  _not enough multi-chunk threads to evaluate (need ≥1 thread with ≥2 chunks)._\n"
+        )
+        same_mean: Optional[float] = None
+        diff_mean: Optional[float] = None
+    else:
+        same_sims: List[float] = []
+        for _ in range(sample_pairs):
+            idxs = rng.choice(multi)
+            i, j = rng.sample(idxs, 2)
+            same_sims.append(float(vectors[i][2] @ vectors[j][2]))
+
+        diff_sims: List[float] = []
+        n = len(vectors)
+        attempts = 0
+        while len(diff_sims) < sample_pairs and attempts < sample_pairs * 4:
+            attempts += 1
+            i, j = rng.sample(range(n), 2)
+            if vectors[i][1] and vectors[i][1] == vectors[j][1]:
+                continue
+            diff_sims.append(float(vectors[i][2] @ vectors[j][2]))
+
+        same_mean = statistics.fmean(same_sims)
+        diff_mean = statistics.fmean(diff_sims) if diff_sims else None
+        gap = (same_mean - diff_mean) if diff_mean is not None else None
+        verdict = (
+            "ok — intra-thread cosine > cross-thread"
+            if (gap is not None and gap > 0.05)
+            else "FAIL — embeddings don't separate threads from random pairs"
+        )
+        cosine_block += _table(
+            ["metric", "value"],
+            [
+                ["pairs sampled (each side)", sample_pairs],
+                ["mean cosine, same thread", f"{same_mean:.4f}"],
+                [
+                    "mean cosine, cross thread",
+                    f"{diff_mean:.4f}" if diff_mean is not None else "n/a",
+                ],
+                ["gap (same − cross)", f"{gap:.4f}" if gap is not None else "n/a"],
+                ["verdict", verdict],
+            ],
+        )
+
+    return (
+        _h(2, "8. Embedding health")
+        + f"_model: `{embed_model}`_\n\n"
+        + summary
+        + cosine_block
+        + "\n"
+    )
+
+
 def section_canned_queries(store: KnowledgeStore) -> str:
     """Six canned queries that exercise the v1 schema end-to-end."""
     out = [_h(2, "7. Canned retrieval queries")]
@@ -460,6 +584,14 @@ def main() -> int:
         "--credentials", type=str, default="",
         help="override Gmail OAuth credentials path (default: ~/.openjarvis/connectors/gmail.json)",
     )
+    parser.add_argument(
+        "--embed-model", type=str, default=DEFAULT_EMBED_MODEL,
+        help=f"Ollama embedding model tag (default: {DEFAULT_EMBED_MODEL})",
+    )
+    parser.add_argument(
+        "--no-embed", action="store_true",
+        help="skip embedding generation (useful when iterating on non-embedding code)",
+    )
     args = parser.parse_args()
 
     db_path = Path(args.db).expanduser()
@@ -481,7 +613,21 @@ def main() -> int:
         return 2
 
     store = KnowledgeStore(db_path=db_path)
-    pipeline = IngestionPipeline(store)
+
+    embedder: Optional[OllamaEmbedder] = None
+    if not args.no_embed:
+        embedder = OllamaEmbedder(model=args.embed_model)
+        if not embedder.is_available():
+            print(
+                f"Ollama daemon or model '{args.embed_model}' not available — "
+                f"chunks will be stored without embeddings. Pass --no-embed to suppress.",
+                file=sys.stderr,
+            )
+            embedder = None
+        else:
+            print(f"Using embedder: {embedder.model_version}")
+
+    pipeline = IngestionPipeline(store, embedder=embedder)
 
     print(f"Syncing Gmail (since={args.since_days}d, limit={args.limit})...")
     t0 = time.time()
@@ -526,6 +672,10 @@ def main() -> int:
         section_channels(store._conn),
         section_people_leaderboard(store._conn),
         section_canned_queries(store),
+        section_embedding_health(
+            store._conn,
+            embed_model=(embedder.model_version if embedder else "(skipped)"),
+        ),
         "---\n_See `scripts/v1_gmail_dogfood_checklist.md` for triage guidance._\n",
     ]
     Path(args.out).write_text("".join(report), encoding="utf-8")
