@@ -50,7 +50,19 @@ from openjarvis.agents.hybrid._base import (
     WEB_SEARCH_COST_PER_CALL,
 )
 from openjarvis.agents.hybrid._prices import NO_TEMP_PREFIXES, supports_temperature
+from openjarvis.agents.hybrid.mini_swe_agent import run_swe_agent_loop
 from openjarvis.core.registry import AgentRegistry
+
+
+MINIONS_SWE_PLANNER_SYS = (
+    "You are the cloud supervisor in a Minions setup. The small local model "
+    "is about to run an agent loop (with shell access) against a Python "
+    "repository to fix a bug. Read the issue and write a concise plan: "
+    "what files the local model should look at first, what tests are most "
+    "relevant, and 1-3 concrete approaches it should try. Be specific — "
+    "this is the local model's only briefing from you. Reply in 8 bullet "
+    "points or fewer."
+)
 
 
 # ---------- Per-turn JSON schemas (server-side enforcement) ----------
@@ -328,17 +340,32 @@ class MinionsAgent(LocalCloudAgent):
         context: Optional[AgentContext],
         **kwargs: Any,
     ) -> Tuple[str, Dict[str, Any]]:
+        cfg = self._cfg
+        task_meta: Dict[str, Any] = {}
+        if context is not None:
+            task_meta = context.metadata.get("task", {}) or {}
+
+        # SWE-bench branch: the upstream Minions library doesn't fit
+        # SWE-bench (it's "small model reads docs, big model summarizes").
+        # Instead, mirror Minions's "cloud supervises, local does the
+        # work" pattern: cloud writes a high-level fix plan, local Qwen
+        # runs mini-SWE-agent with that plan as additional context.
+        swe_mode = (
+            bool(cfg.get("swe_use_agent_loop"))
+            and bool(task_meta.get("problem_statement"))
+            and bool(task_meta.get("repo"))
+            and bool(task_meta.get("base_commit"))
+        )
+        if swe_mode:
+            return self._run_swe(input, task_meta, cfg)
+
         _apply_patches_once()
         from minions.clients.openai import OpenAIClient  # type: ignore[import-not-found]
         from minions.clients.anthropic import AnthropicClient  # type: ignore[import-not-found]
         from minions.minion import Minion  # type: ignore[import-not-found]
         from minions.minions import Minions  # type: ignore[import-not-found]
 
-        cfg = self._cfg
         mode = cfg.get("mode", "minion")
-        task_meta: Dict[str, Any] = {}
-        if context is not None:
-            task_meta = context.metadata.get("task", {}) or {}
 
         if not self._local_endpoint or not self._local_model:
             raise ValueError(
@@ -448,6 +475,77 @@ class MinionsAgent(LocalCloudAgent):
             },
         }
         return out.get("final_answer", ""), meta
+
+
+    # ------------------------------------------------------------------
+    # SWE-bench variant
+    # ------------------------------------------------------------------
+
+    def _run_swe(
+        self,
+        input: str,
+        task: Dict[str, Any],
+        cfg: Dict[str, Any],
+    ) -> Tuple[str, Dict[str, Any]]:
+        if not self._local_endpoint or not self._local_model:
+            raise ValueError(
+                "MinionsAgent (swe mode) still needs local_model + local_endpoint"
+            )
+        # 1. Cloud supervisor writes a high-level plan (no tools).
+        plan_text, p_in, p_out = self._call_cloud(
+            user=(
+                f"Issue:\n{task.get('problem_statement','')}\n\n"
+                f"Repo: {task.get('repo','')}\n"
+                f"Base commit: {task.get('base_commit','')}\n\n"
+                f"{task.get('hints_text','')}"
+            ),
+            system=MINIONS_SWE_PLANNER_SYS,
+            max_tokens=int(cfg.get("supervisor_max_tokens", 1024)),
+            temperature=0.0,
+        )
+        self.record_trace_event({
+            "kind": "minions_swe_plan",
+            "plan": plan_text,
+            "tokens_in": p_in,
+            "tokens_out": p_out,
+        })
+        supervisor_cost = self.cost_usd(self._cloud_model, p_in, p_out)
+
+        # 2. Local worker runs mini-SWE-agent with the plan as context.
+        worker_prompt = (
+            f"{input}\n\n"
+            f"-----\n"
+            f"A cloud supervisor reviewed this issue and wrote a fix plan "
+            f"for you. Use it as guidance, but verify everything with the "
+            f"actual code via your bash tool:\n\n{plan_text}"
+        )
+        out = run_swe_agent_loop(
+            task,
+            backbone="local",
+            backbone_model=self._local_model,
+            local_endpoint=self._local_endpoint,
+            initial_prompt=worker_prompt,
+            max_turns=int(cfg.get("swe_max_turns", 30)),
+            bash_timeout=int(cfg.get("swe_bash_timeout_s", 120)),
+            output_cap=int(cfg.get("swe_output_cap", 10_000)),
+            turn_max_tokens=int(cfg.get("swe_turn_max_tokens", 4096)),
+            trace_prefix="minions_worker",
+        )
+
+        meta = {
+            "tokens_local": out["tokens_in"] + out["tokens_out"],
+            "tokens_cloud": p_in + p_out,
+            "cost_usd": supervisor_cost,
+            "turns": 1 + out["turns"],
+            "traces": {
+                "swe_mode": True,
+                "supervisor_plan": plan_text,
+                "worker_final_summary": out["final_summary"],
+                "worker_patch_chars": len(out["patch"]),
+                "max_turns_hit": out["max_turns_hit"],
+            },
+        }
+        return out["answer"], meta
 
 
 __all__ = ["MinionsAgent"]

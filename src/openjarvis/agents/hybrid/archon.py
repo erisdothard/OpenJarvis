@@ -42,8 +42,24 @@ from typing import Any, Dict, Optional, Tuple
 
 from openjarvis.agents._stubs import AgentContext
 from openjarvis.agents.hybrid._base import LocalCloudAgent, _record_event
-from openjarvis.agents.hybrid._prices import NO_TEMP_PREFIXES, cost as _cost_cloud
+from openjarvis.agents.hybrid._prices import (
+    NO_TEMP_PREFIXES,
+    cost as _cost_cloud,
+    supports_temperature,
+)
+from openjarvis.agents.hybrid.mini_swe_agent import run_swe_agent_loop
 from openjarvis.core.registry import AgentRegistry
+
+
+ARCHON_SWE_RANKER_SYS = (
+    "You are ranking K candidate patches for a SWE-bench bug. For each "
+    "candidate, you'll see the candidate's summary text and the unified "
+    "diff. Pick the index (0-based) of the candidate most likely to "
+    "actually fix the issue. Prefer minimal, targeted patches; reject "
+    "candidates with no patch or with patches that touch unrelated files. "
+    "Respond with a single integer on its own line — the index — "
+    "followed by a one-line justification."
+)
 
 
 # ---------- Stubs for Archon's eager-imported heavy deps we don't need ----------
@@ -230,6 +246,45 @@ def _wrap_archon_cloud_generators() -> None:
     _GMAP["Anthropic_API"] = gen_anthropic
 
 
+_FUSER_FORMAT_REMINDER = (
+    "\n\nIMPORTANT — output format: your synthesized response MUST honor the "
+    "output-format requirements stated in the original user query above. "
+    "If the query requires ending with `FINAL ANSWER: <answer>` (GAIA), end "
+    "with exactly that one line and nothing after it. If the query requires "
+    "a unified diff inside a ```diff … ``` fence (SWE-bench), end with that "
+    "fence and nothing after the closing ```. Do not produce free-form "
+    "analysis, markdown headers, or commentary that breaks the required "
+    "format — the candidate responses may have done so, but your fused "
+    "answer must not."
+)
+
+
+def _patch_archon_prompts() -> None:
+    """Make Archon's fuser bench-aware.
+
+    ``Fuser.py`` drops the system message we hand to ``archon.generate()`` and
+    builds its own user message via ``make_fuser_prompt``. That template tells
+    the fuser to "synthesize into a refined, well-structured response" with
+    no reminder of the format the user originally asked for, so on SWE-bench
+    Opus drifts to a markdown bug report and scores 0. We append an explicit
+    format-honor reminder to the fuser prompt."""
+    from archon.completions.components import prompts as _p  # type: ignore[import-not-found]
+
+    if getattr(_p.make_fuser_prompt, "_hybrid_format_patched", False):
+        return
+    orig = _p.make_fuser_prompt
+
+    def patched(conv, references, critiques=None, length_control=False):  # type: ignore[no-untyped-def]
+        base = orig(conv, references, critiques=critiques, length_control=length_control)
+        return base + _FUSER_FORMAT_REMINDER
+
+    patched._hybrid_format_patched = True  # type: ignore[attr-defined]
+    _p.make_fuser_prompt = patched
+    # Fuser imports the symbol by name at class-body time — rebind there too.
+    from archon.completions.components import Fuser as _F  # type: ignore[import-not-found]
+    _F.make_fuser_prompt = patched
+
+
 _PATCHES_APPLIED = False
 
 
@@ -243,6 +298,7 @@ def _apply_patches_once() -> None:
     # Trigger Archon imports so GENERATE_MAP exists.
     import archon.completions.components.Generator  # type: ignore[import-not-found]  # noqa: F401
     _wrap_archon_cloud_generators()
+    _patch_archon_prompts()
     _PATCHES_APPLIED = True
 
 
@@ -306,11 +362,21 @@ class ArchonAgent(LocalCloudAgent):
         if "OPENAI_API_KEY" not in os.environ and "ANTHROPIC_API_KEY" not in os.environ:
             raise RuntimeError("Archon needs OPENAI_API_KEY and/or ANTHROPIC_API_KEY")
 
+        cfg = self._cfg
+        task_meta = (context.metadata.get("task") if context is not None else {}) or {}
+        swe_mode = (
+            bool(cfg.get("swe_use_agent_loop"))
+            and bool(task_meta.get("problem_statement"))
+            and bool(task_meta.get("repo"))
+            and bool(task_meta.get("base_commit"))
+        )
+        if swe_mode:
+            return self._run_swe(input, task_meta, cfg)
+
         _apply_patches_once()
         from archon.completions import Archon  # type: ignore[import-not-found]
         from archon.completions.components.Generator import GENERATE_MAP as _GMAP  # type: ignore[import-not-found]
 
-        cfg = self._cfg
         arch = cfg.get("architecture", "ensemble_rank_fuse")
         presets = _presets()
         if arch not in presets:
@@ -376,6 +442,119 @@ class ArchonAgent(LocalCloudAgent):
             },
         }
         return answer, meta
+
+    # ------------------------------------------------------------------
+    # SWE-bench variant: K diverse mini-SWE-agent runs, cloud ranker picks
+    # ------------------------------------------------------------------
+
+    def _run_swe(
+        self,
+        input: str,
+        task: Dict[str, Any],
+        cfg: Dict[str, Any],
+    ) -> Tuple[str, Dict[str, Any]]:
+        if not self._local_endpoint or not self._local_model:
+            raise ValueError(
+                "ArchonAgent (swe mode) needs local_model + local_endpoint"
+            )
+
+        K = int(cfg.get("n_samples", 3))
+        max_turns = int(cfg.get("swe_max_turns", 30))
+        bash_timeout = int(cfg.get("swe_bash_timeout_s", 120))
+        output_cap = int(cfg.get("swe_output_cap", 10_000))
+        turn_max_tokens = int(cfg.get("swe_turn_max_tokens", 4096))
+
+        # K independent runs, each on a FRESH workdir → K diverse patches.
+        candidates: List[Dict[str, Any]] = []
+        total_tokens_local = 0
+        total_tokens_cloud = 0
+        total_cost = 0.0
+        for k in range(K):
+            out = run_swe_agent_loop(
+                task,
+                backbone="local",
+                backbone_model=self._local_model,
+                local_endpoint=self._local_endpoint,
+                initial_prompt=input,
+                max_turns=max_turns,
+                bash_timeout=bash_timeout,
+                output_cap=output_cap,
+                turn_max_tokens=turn_max_tokens,
+                trace_prefix=f"archon_gen{k}",
+            )
+            candidates.append({
+                "idx": k,
+                "summary": out["final_summary"],
+                "patch": out["patch"],
+                "framed": out["answer"],
+                "tokens_in": out["tokens_in"],
+                "tokens_out": out["tokens_out"],
+                "turns": out["turns"],
+            })
+            total_tokens_local += out["tokens_in"] + out["tokens_out"]
+            self.record_trace_event({
+                "kind": "archon_swe_candidate",
+                "idx": k,
+                "patch_chars": len(out["patch"]),
+                "summary": out["final_summary"],
+            })
+
+        # Ranker: cloud picks the best candidate.
+        ranker_user = (
+            f"Issue:\n{task.get('problem_statement','')}\n\n"
+            f"K = {K} candidate patches:\n\n"
+            + "\n\n".join(
+                f"=== Candidate {c['idx']} ===\nSummary: {c['summary']}\n"
+                f"Patch (chars={len(c['patch'])}):\n```diff\n{c['patch']}```"
+                for c in candidates
+            )
+        )
+        ranker_text, r_in, r_out = self._call_cloud(
+            user=ranker_user,
+            system=ARCHON_SWE_RANKER_SYS,
+            max_tokens=int(cfg.get("ranker_max_tokens", 1024)),
+            temperature=0.0,
+        )
+        total_tokens_cloud += r_in + r_out
+        total_cost += self.cost_usd(self._cloud_model, r_in, r_out)
+
+        # Parse — first integer on its own line.
+        chosen_idx = 0
+        for line in ranker_text.splitlines():
+            stripped = line.strip()
+            if stripped.isdigit():
+                chosen_idx = int(stripped)
+                break
+        if not (0 <= chosen_idx < K):
+            chosen_idx = 0
+        chosen = candidates[chosen_idx]
+
+        self.record_trace_event({
+            "kind": "archon_swe_rank",
+            "chosen_idx": chosen_idx,
+            "ranker_raw": ranker_text,
+            "tokens_in": r_in,
+            "tokens_out": r_out,
+        })
+
+        meta = {
+            "tokens_local": total_tokens_local,
+            "tokens_cloud": total_tokens_cloud,
+            "cost_usd": total_cost,
+            "turns": sum(c["turns"] for c in candidates) + 1,
+            "traces": {
+                "swe_mode": True,
+                "K": K,
+                "candidates": [
+                    {"idx": c["idx"], "summary": c["summary"],
+                     "patch_chars": len(c["patch"]), "turns": c["turns"]}
+                    for c in candidates
+                ],
+                "chosen_idx": chosen_idx,
+                "ranker_text": ranker_text,
+            },
+        }
+        return chosen["framed"], meta
 
 
 __all__ = ["ArchonAgent"]
