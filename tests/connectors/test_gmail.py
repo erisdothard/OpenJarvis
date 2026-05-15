@@ -556,3 +556,202 @@ def test_sync_prefers_text_plain_over_text_html(
     docs = list(connector.sync())
     assert len(docs) == 1
     assert docs[0].content == "Plain text version preferred."
+
+
+# ---------------------------------------------------------------------------
+# Auto-refresh on 401
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    """Minimal stand-in for httpx.Response used by the refresh test."""
+
+    def __init__(self, *, status_code: int, json_data: dict | None = None, text: str = ""):
+        self.status_code = status_code
+        self._json = json_data or {}
+        self.text = text
+
+    def json(self):
+        return self._json
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import httpx as _httpx
+            raise _httpx.HTTPStatusError(
+                f"HTTP {self.status_code}", request=None, response=self
+            )
+
+
+def _write_full_creds(tmp_path: Path) -> str:
+    """Write a credentials file with a refresh_token and client credentials."""
+    creds_path = tmp_path / "gmail.json"
+    creds_path.write_text(
+        json.dumps(
+            {
+                "access_token": "old-access-token",
+                "refresh_token": "stored-refresh-token",
+                "client_id": "client-id-abc",
+                "client_secret": "client-secret-xyz",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(creds_path)
+
+
+def test_401_triggers_refresh_and_retries_with_new_token(tmp_path: Path) -> None:
+    """A 401 on a Gmail API call refreshes the token, persists it, and retries."""
+    from openjarvis.connectors import gmail as gmail_mod
+
+    creds_path = _write_full_creds(tmp_path)
+
+    # The first httpx.get returns 401, the second returns 200.
+    get_calls: list[dict] = []
+
+    def fake_get(url, *, headers, params, timeout):
+        get_calls.append({"url": url, "headers": dict(headers), "params": dict(params)})
+        if len(get_calls) == 1:
+            return _FakeResponse(status_code=401, text="unauthorized")
+        return _FakeResponse(status_code=200, json_data={"id": "msg-1", "payload": {}})
+
+    post_calls: list[dict] = []
+
+    def fake_post(url, *, data, timeout):
+        post_calls.append({"url": url, "data": dict(data)})
+        return _FakeResponse(
+            status_code=200,
+            json_data={"access_token": "fresh-access-token", "expires_in": 3599},
+        )
+
+    with patch.object(gmail_mod.httpx, "get", side_effect=fake_get), \
+         patch.object(gmail_mod.httpx, "post", side_effect=fake_post):
+        result = gmail_mod._call_with_refresh(
+            gmail_mod._gmail_api_get_message, creds_path, "msg-1"
+        )
+
+    # The retried request must carry the fresh token.
+    assert len(get_calls) == 2
+    assert get_calls[0]["headers"]["Authorization"] == "Bearer old-access-token"
+    assert get_calls[1]["headers"]["Authorization"] == "Bearer fresh-access-token"
+
+    # The refresh hit Google's token endpoint with the stored refresh credentials.
+    assert len(post_calls) == 1
+    assert post_calls[0]["url"] == "https://oauth2.googleapis.com/token"
+    assert post_calls[0]["data"] == {
+        "client_id": "client-id-abc",
+        "client_secret": "client-secret-xyz",
+        "refresh_token": "stored-refresh-token",
+        "grant_type": "refresh_token",
+    }
+
+    # The new access_token is persisted to the credentials file.
+    on_disk = json.loads(Path(creds_path).read_text(encoding="utf-8"))
+    assert on_disk["access_token"] == "fresh-access-token"
+    assert on_disk["token"] == "fresh-access-token"  # legacy key kept in sync
+    assert on_disk["refresh_token"] == "stored-refresh-token"
+    assert on_disk["expires_in"] == 3599
+
+    # And the caller saw the body of the retried request.
+    assert result == {"id": "msg-1", "payload": {}}
+
+
+def test_non_401_status_is_not_refreshed(tmp_path: Path) -> None:
+    """A 500 from Gmail must propagate — only 401 should trigger refresh."""
+    from openjarvis.connectors import gmail as gmail_mod
+    import httpx as _httpx
+
+    creds_path = _write_full_creds(tmp_path)
+
+    def fake_get(url, *, headers, params, timeout):
+        return _FakeResponse(status_code=503, text="service unavailable")
+
+    fake_post = patch.object(gmail_mod.httpx, "post", side_effect=AssertionError(
+        "_call_with_refresh must not refresh on non-401 status"
+    ))
+
+    with patch.object(gmail_mod.httpx, "get", side_effect=fake_get), fake_post:
+        with pytest.raises(_httpx.HTTPStatusError):
+            gmail_mod._call_with_refresh(
+                gmail_mod._gmail_api_get_message, creds_path, "msg-1"
+            )
+
+
+def test_refresh_raises_when_refresh_token_missing(tmp_path: Path) -> None:
+    """Refresh aborts with a clear error when no refresh_token is stored."""
+    from openjarvis.connectors import gmail as gmail_mod
+
+    creds_path = tmp_path / "gmail.json"
+    creds_path.write_text(
+        json.dumps({"access_token": "stale", "client_id": "c", "client_secret": "s"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(gmail_mod.GmailAuthError, match="refresh_token"):
+        gmail_mod._refresh_access_token(str(creds_path))
+
+
+def test_sync_recovers_when_list_returns_401(tmp_path: Path) -> None:
+    """An end-to-end sync survives a 401 on messages.list without re-auth.
+
+    Sets up a connector against a creds file with full refresh credentials,
+    has the first list call return 401, the refresh return a new token, and
+    the retried list call return one message stub which is then fetched
+    successfully. Verifies the connector yields the expected Document and
+    that the credentials file is rewritten with the fresh token.
+    """
+    from openjarvis.connectors import gmail as gmail_mod
+
+    creds_path = _write_full_creds(tmp_path)
+    connector = gmail_mod.GmailConnector(credentials_path=creds_path)
+
+    list_calls: list[str] = []
+
+    def fake_get(url, *, headers, params, timeout):
+        auth = headers.get("Authorization", "")
+        if "/messages/" in url:
+            # The single get_message call after the retried list call.
+            return _FakeResponse(
+                status_code=200,
+                json_data={
+                    "id": "msg-99",
+                    "threadId": "thread-99",
+                    "labelIds": ["INBOX"],
+                    "payload": {
+                        "mimeType": "text/plain",
+                        "headers": [
+                            {"name": "From", "value": "alice@example.com"},
+                            {"name": "To", "value": "me@example.com"},
+                            {"name": "Subject", "value": "Hi"},
+                            {"name": "Date", "value": "Mon, 01 Jan 2024 10:00:00 +0000"},
+                        ],
+                        "body": {"data": "SGVsbG8="},
+                    },
+                },
+            )
+        # /messages list call
+        list_calls.append(auth)
+        if len(list_calls) == 1:
+            return _FakeResponse(status_code=401, text="unauthorized")
+        return _FakeResponse(
+            status_code=200,
+            json_data={"messages": [{"id": "msg-99"}]},
+        )
+
+    def fake_post(url, *, data, timeout):
+        return _FakeResponse(
+            status_code=200,
+            json_data={"access_token": "fresh-token-after-401", "expires_in": 3599},
+        )
+
+    with patch.object(gmail_mod.httpx, "get", side_effect=fake_get), \
+         patch.object(gmail_mod.httpx, "post", side_effect=fake_post):
+        docs: List[Document] = list(connector.sync())
+
+    assert len(docs) == 1
+    assert docs[0].title == "Hi"
+    assert docs[0].author == "alice@example.com"
+    # First list call carried the stale token; second carried the fresh one.
+    assert list_calls == ["Bearer old-access-token", "Bearer fresh-token-after-401"]
+    # Creds file persisted the new token.
+    on_disk = json.loads(Path(creds_path).read_text(encoding="utf-8"))
+    assert on_disk["access_token"] == "fresh-token-after-401"
