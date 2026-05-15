@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from openjarvis.connectors.hybrid_search import HybridSearch, SearchHit
 from openjarvis.core.types import Message, Role, ToolCall
@@ -29,6 +30,35 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_PLANNER_MODEL = "gemma4:31b"
+
+
+CLARIFY_TOOL_SPEC: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "clarify",
+        "description": (
+            "Ask the user a clarifying question and wait for their answer. "
+            "Only use AFTER at least one search has been attempted. Use when "
+            "search results are ambiguous (e.g. three different people share "
+            "a first name), search returned zero results and the query likely "
+            "needs reframing, or the scope is too broad to synthesize "
+            "meaningfully. Never use clarify before searching."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "The clarifying question to ask the user. Be specific "
+                        "about what you need to know to make progress."
+                    ),
+                },
+            },
+            "required": ["question"],
+        },
+    },
+}
 
 
 SEARCH_TOOL_SPEC: Dict[str, Any] = {
@@ -87,16 +117,18 @@ SEARCH_TOOL_SPEC: Dict[str, Any] = {
 }
 
 
-SYSTEM_PROMPT = """You are a research assistant with access to the user's personal knowledge corpus (their email, notes, calendar). You answer questions by calling a single tool:
+SYSTEM_PROMPT = """You are a research assistant with access to the user's personal knowledge corpus (their email, notes, calendar). You answer questions by calling two tools:
 
     search(query, person=None, time_range=None, sources=None, limit=20)
+    clarify(question)
 
 Strategy:
   1. If the user names a person, ALWAYS pass `person=` rather than relying on lexical match. Hybrid search will fuzzy-match name or address fragments.
   2. When the user mentions ANY time window — "this past week", "recently", "last month", "past few days", "yesterday" — you MUST translate it to a `time_range` parameter. Today is {today}.
   3. The `time_range` argument is a JSON object: `{{"start": "<ISO 8601>", "end": "<ISO 8601>"}}`. Either bound may be omitted, but pass at least one whenever the user gave you a temporal cue.
   4. If the first structured search returns nothing useful, broaden with a semantic query and drop filters one at a time.
-  5. Call search up to 5 times. Once you have enough, write a synthesis.
+  5. You have a clarify tool. Only use it AFTER at least one search attempt. Use it when: you found multiple ambiguous matches (e.g. 3 different people named John), search returned zero results and the query might need reframing, or the scope is too broad to synthesize meaningfully. Never use clarify before searching — always try first.
+  6. Tool calls — search AND clarify — share a budget of 5 total. Spend wisely.
 
 Synthesis rules:
   - Cite specific results by their numeric id (e.g. "[hit-3]").
@@ -168,12 +200,34 @@ def shape_results_for_model(
 
 @dataclass
 class ToolInvocation:
-    """One call to ``search`` together with what the planner asked for and got."""
+    """One tool call together with what the planner asked for and got.
+
+    ``tool_name`` is ``"search"`` or ``"clarify"``. For search calls,
+    ``num_results``, ``top_titles`` and ``raw_hits`` are populated; for
+    clarify calls, ``response`` holds the user's answer.
+    """
 
     arguments: Dict[str, Any]
-    num_results: int
-    top_titles: List[str]
+    num_results: int = 0
+    top_titles: List[str] = field(default_factory=list)
     raw_hits: List[SearchHit] = field(default_factory=list)
+    tool_name: str = "search"
+    response: str = ""
+
+
+def _default_clarify_handler(question: str) -> str:
+    """Prompt the user on stdout and read a one-line answer from stdin.
+
+    Empty answers are echoed back as a sentinel so the planner doesn't think
+    the user was silent because of an upstream error.
+    """
+    print(file=sys.stderr)
+    print(f"\033[1m🤔 Clarification needed:\033[0m {question}", file=sys.stderr)
+    try:
+        answer = input("> ").strip()
+    except EOFError:
+        return "(no answer provided)"
+    return answer or "(user did not provide a clarification)"
 
 
 @dataclass
@@ -212,6 +266,7 @@ class ResearchAgent:
         temperature: float = 0.3,
         max_tokens: int = 1500,
         num_ctx: int = 16384,
+        clarify_handler: Optional[Callable[[str], str]] = None,
     ) -> None:
         self._engine = engine
         self._search = search
@@ -220,6 +275,7 @@ class ResearchAgent:
         self._temperature = float(temperature)
         self._max_tokens = int(max_tokens)
         self._num_ctx = int(num_ctx)
+        self._clarify_handler = clarify_handler or _default_clarify_handler
 
     # ------------------------------------------------------------------
     # Argument parsing
@@ -261,6 +317,7 @@ class ResearchAgent:
         )
         titles = [h.title or (h.content_snippet[:60] + "…") for h in hits[:5]]
         return ToolInvocation(
+            tool_name="search",
             arguments={
                 "query": query,
                 "person": person,
@@ -275,6 +332,21 @@ class ResearchAgent:
             num_results=len(hits),
             top_titles=titles,
             raw_hits=hits,
+        )
+
+    def _execute_clarify(self, args: Dict[str, Any]) -> ToolInvocation:
+        question = str(args.get("question", "") or "").strip()
+        if not question:
+            return ToolInvocation(
+                tool_name="clarify",
+                arguments={"question": ""},
+                response="(no question provided by agent — skipping clarify)",
+            )
+        answer = self._clarify_handler(question)
+        return ToolInvocation(
+            tool_name="clarify",
+            arguments={"question": question},
+            response=answer,
         )
 
     # ------------------------------------------------------------------
@@ -295,7 +367,11 @@ class ResearchAgent:
         iterations = 0
         for _ in range(self._max_iterations + 1):
             iterations += 1
-            tools_arg = [SEARCH_TOOL_SPEC] if len(invocations) < self._max_iterations else None
+            tools_arg = (
+                [SEARCH_TOOL_SPEC, CLARIFY_TOOL_SPEC]
+                if len(invocations) < self._max_iterations
+                else None
+            )
             result = self._engine.generate(
                 messages,
                 model=self._model,
@@ -360,15 +436,48 @@ class ResearchAgent:
                 except json.JSONDecodeError:
                     args = {}
 
-                if name != "search":
-                    tool_output = json.dumps(
-                        {"error": f"unknown tool {name!r}; only 'search' is available"}
-                    )
-                else:
+                if name == "search":
+                    # Guard against the planner pre-empting clarify before any
+                    # search has run — silently accept; the rule lives in the
+                    # system prompt as guidance, not enforcement.
                     inv = self._execute_search(args)
                     invocations.append(inv)
                     tool_output = json.dumps(
                         shape_results_for_model(inv.raw_hits), ensure_ascii=False
+                    )
+                elif name == "clarify":
+                    # Enforce the "search first" rule at runtime so we don't
+                    # surprise the user with a clarification before showing any
+                    # work. If the planner jumps to clarify with no searches
+                    # behind it, return an error and let the loop try again.
+                    if not any(i.tool_name == "search" for i in invocations):
+                        tool_output = json.dumps(
+                            {
+                                "error": (
+                                    "clarify is only available after at least "
+                                    "one search call. Run search first, then "
+                                    "use clarify if the results are ambiguous "
+                                    "or empty."
+                                )
+                            }
+                        )
+                    else:
+                        inv = self._execute_clarify(args)
+                        invocations.append(inv)
+                        tool_output = json.dumps(
+                            {
+                                "question": inv.arguments.get("question", ""),
+                                "user_response": inv.response,
+                            }
+                        )
+                else:
+                    tool_output = json.dumps(
+                        {
+                            "error": (
+                                f"unknown tool {name!r}; available tools are "
+                                "'search' and 'clarify'"
+                            )
+                        }
                     )
 
                 messages.append(
@@ -385,9 +494,10 @@ class ResearchAgent:
                     Message(
                         role=Role.USER,
                         content=(
-                            "You have used your tool-call budget. Write the final "
-                            "synthesis now using only the search results above. "
-                            "Cite specific hits by id."
+                            "You have used your tool-call budget (search + "
+                            "clarify combined). Write the final synthesis now "
+                            "using only the search results and clarifications "
+                            "above. Cite specific hits by id."
                         ),
                     )
                 )
@@ -406,6 +516,7 @@ __all__ = [
     "ResearchResult",
     "ToolInvocation",
     "SEARCH_TOOL_SPEC",
+    "CLARIFY_TOOL_SPEC",
     "SYSTEM_PROMPT",
     "DEFAULT_PLANNER_MODEL",
     "shape_results_for_model",
