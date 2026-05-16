@@ -146,31 +146,51 @@ def _chunk_synthesis(text: str, window_chars: int = 40) -> list[str]:
 
 
 async def _stream_research(query: str, model: str) -> AsyncGenerator[str, None]:
-    """Drive ResearchAgent on a worker thread; yield SSE frames as they land."""
-    loop = asyncio.get_event_loop()
-    queue: asyncio.Queue = asyncio.Queue()
+    """Drive ResearchAgent on a worker thread; yield SSE frames as they land.
 
-    def on_event(event: Dict[str, Any]) -> None:
-        # Called from the agent's worker thread; bounce onto the event loop.
-        loop.call_soon_threadsafe(queue.put_nowait, event)
+    Three error envelopes — setup, worker, consumer — all funnel into the
+    same two-frame contract: ``{"type": "error", ...}`` followed by
+    ``{"type": "done", "usage": {...}}``. The client can rely on always
+    seeing a ``done`` frame, even when the agent never started.
+    """
+    # Phase 1: setup. Failures here (Ollama daemon down, DB locked, etc.)
+    # yield error + done and return — nothing has been emitted yet so the
+    # client gets a clean two-frame stream instead of a dangling connection.
+    try:
+        loop = asyncio.get_event_loop()
+        queue: asyncio.Queue = asyncio.Queue()
 
-    # Each request gets its own thin set of connectors. Constructing them is
-    # cheap (SQLite open + HTTP keepalive) and avoids state leaks between
-    # concurrent requests.
-    store = KnowledgeStore()
-    embedder = OllamaEmbedder()
-    if not embedder.is_available():
-        logger.warning("research: Ollama embedder unavailable; BM25-only retrieval.")
-        embedder = None
+        def on_event(event: Dict[str, Any]) -> None:
+            # Called from the agent's worker thread; bounce onto the event loop.
+            loop.call_soon_threadsafe(queue.put_nowait, event)
 
-    engine = OllamaEngine()
-    agent = ResearchAgent(
-        engine=engine,
-        search=HybridSearch(store, embedder),
-        model=model,
-        clarify_handler=lambda question: _WEB_CLARIFY_RESPONSE,
-        on_event=on_event,
-    )
+        # Each request gets its own thin set of connectors. Constructing them
+        # is cheap (SQLite open + HTTP keepalive) and avoids state leaks
+        # between concurrent requests.
+        store = KnowledgeStore()
+        embedder = OllamaEmbedder()
+        if not embedder.is_available():
+            logger.warning("research: Ollama embedder unavailable; BM25-only retrieval.")
+            embedder = None
+
+        engine = OllamaEngine()
+        agent = ResearchAgent(
+            engine=engine,
+            search=HybridSearch(store, embedder),
+            model=model,
+            clarify_handler=lambda question: _WEB_CLARIFY_RESPONSE,
+            on_event=on_event,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("research: setup failed before agent could run: %s", exc)
+        yield _sse(
+            {
+                "type": "error",
+                "message": f"Research failed: {type(exc).__name__}: {exc}",
+            }
+        )
+        yield _sse({"type": "done", "usage": {}})
+        return
 
     def _run() -> None:
         t0 = time.time()
@@ -231,11 +251,28 @@ async def _stream_research(query: str, model: str) -> AsyncGenerator[str, None]:
         # If the agent thread crashed before producing a final answer, the
         # client still gets the error frame (emitted above) followed by done.
         yield _sse({"type": "done", "usage": final_usage})
+    except Exception as exc:  # noqa: BLE001
+        # Consumer loop crashed unexpectedly (e.g. JSON serialization fault,
+        # logic bug). Surface a clean error frame rather than letting the
+        # SSE connection die mid-stream.
+        logger.exception("research: stream consumer crashed: %s", exc)
+        yield _sse(
+            {
+                "type": "error",
+                "message": f"Research failed: {type(exc).__name__}: {exc}",
+            }
+        )
+        yield _sse({"type": "done", "usage": final_usage})
     finally:
         # The worker may still be cleaning up (rarely) — make sure we don't
-        # leak a dangling task.
+        # leak a dangling task. Swallow any straggler exception so a worker
+        # failure during teardown doesn't escape the generator after we've
+        # already emitted the terminal done frame.
         if not task.done():
-            await task
+            try:
+                await task
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("research: worker task ended with %s", exc)
 
 
 # ---------------------------------------------------------------------------
