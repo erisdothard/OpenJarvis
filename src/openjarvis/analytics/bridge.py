@@ -87,13 +87,9 @@ class EventBridge:
                 self.bus.unsubscribe(EventType.INFERENCE_END, self._on_inference_end)
                 self.bus.unsubscribe(EventType.TOOL_CALL_END, self._on_tool_end)
                 self.bus.unsubscribe(EventType.SESSION_END, self._on_session_end)
-                self.bus.unsubscribe(
-                    EventType.AGENT_TURN_END, self._on_agent_turn_end
-                )
+                self.bus.unsubscribe(EventType.AGENT_TURN_END, self._on_agent_turn_end)
                 self.bus.unsubscribe(EventType.FEEDBACK_RECEIVED, self._on_feedback)
-                self.bus.unsubscribe(
-                    EventType.SECURITY_ALERT, self._on_security_alert
-                )
+                self.bus.unsubscribe(EventType.SECURITY_ALERT, self._on_security_alert)
             except Exception as exc:
                 logger.debug("Analytics bridge unsubscribe error: %s", exc)
             self._subscribed = False
@@ -116,7 +112,9 @@ class EventBridge:
             data = event.data or {}
             self.aggregator.record_inference(
                 session_id=self._session_id(data),
-                tokens_in=int(data.get("input_tokens") or data.get("prompt_tokens") or 0),
+                tokens_in=int(
+                    data.get("input_tokens") or data.get("prompt_tokens") or 0
+                ),
                 tokens_out=int(
                     data.get("output_tokens") or data.get("completion_tokens") or 0
                 ),

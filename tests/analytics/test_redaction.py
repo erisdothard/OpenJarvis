@@ -27,7 +27,6 @@ from openjarvis.analytics.redaction import (
     redact,
 )
 
-
 # ---------------------------------------------------------------------------
 # Value-level PII detection
 # ---------------------------------------------------------------------------
@@ -125,13 +124,18 @@ def test_redact_keeps_safe_values() -> None:
 
 
 def test_redact_drops_pii_strings() -> None:
+    _jwt = (
+        "eyJhbGciOiJIUzI1NiJ9"
+        ".eyJzdWIiOiIxMjM0In0"
+        ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+    )
     cleaned = redact(
         {
             "ok": "chat",
             "leak_email": "user@example.com",
             "leak_path": "/Users/alice/file.txt",
             "leak_key": "sk-1234567890abcdef",
-            "leak_jwt": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+            "leak_jwt": _jwt,
             "leak_bearer": "Bearer abc123",
         }
     )

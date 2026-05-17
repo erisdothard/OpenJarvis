@@ -39,14 +39,14 @@ _PII_PATTERNS: tuple[re.Pattern[str], ...] = (
     # File URLs
     re.compile(r"file://"),
     # Common API key prefixes
-    re.compile(r"\bsk-[A-Za-z0-9_-]{8,}"),     # OpenAI / Anthropic
-    re.compile(r"\bxoxb-[A-Za-z0-9-]{8,}"),    # Slack bot
-    re.compile(r"\bxoxp-[A-Za-z0-9-]{8,}"),    # Slack user
-    re.compile(r"\bghp_[A-Za-z0-9]{20,}"),     # GitHub personal
-    re.compile(r"\bgho_[A-Za-z0-9]{20,}"),     # GitHub OAuth
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),       # AWS access key
-    re.compile(r"\bAIza[0-9A-Za-z_-]{20,}"),   # Google API key
-    re.compile(r"\bya29\.[0-9A-Za-z_-]+"),     # Google OAuth access token
+    re.compile(r"\bsk-[A-Za-z0-9_-]{8,}"),  # OpenAI / Anthropic
+    re.compile(r"\bxoxb-[A-Za-z0-9-]{8,}"),  # Slack bot
+    re.compile(r"\bxoxp-[A-Za-z0-9-]{8,}"),  # Slack user
+    re.compile(r"\bghp_[A-Za-z0-9]{20,}"),  # GitHub personal
+    re.compile(r"\bgho_[A-Za-z0-9]{20,}"),  # GitHub OAuth
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # AWS access key
+    re.compile(r"\bAIza[0-9A-Za-z_-]{20,}"),  # Google API key
+    re.compile(r"\bya29\.[0-9A-Za-z_-]+"),  # Google OAuth access token
     # JWT (three base64url chunks separated by dots, header starts with eyJ)
     re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
     # Bearer authorization headers

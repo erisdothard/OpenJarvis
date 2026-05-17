@@ -42,11 +42,7 @@ def _is_int_nonneg(v: Any) -> bool:
 
 
 def _is_number_nonneg(v: Any) -> bool:
-    return (
-        isinstance(v, (int, float))
-        and not isinstance(v, bool)
-        and v >= 0
-    )
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0
 
 
 def _is_short_str(v: Any) -> bool:
