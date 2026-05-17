@@ -192,18 +192,26 @@ export async function checkHealth(): Promise<boolean> {
       return false;
     }
   }
-  // In the browser, ALWAYS hit /health relative to the page origin so the
-  // request flows through whatever path is already serving the SPA — the
-  // Vite proxy in dev, FastAPI's static mount in prod. This avoids the
+  // In the browser, hit /health relative to the page origin so the request
+  // flows through whatever path is already serving the SPA — the Vite
+  // proxy in dev, FastAPI's static mount in prod. This avoids the
   // false-negative "Cannot reach backend" banner when getBase() points at
-  // an absolute URL the browser can't reach directly (e.g. a remote DGX
-  // accessed only via the dev proxy / SSH port-forward).
-  try {
-    const res = await fetch('/health');
-    return res.ok;
-  } catch {
-    return false;
-  }
+  // an absolute URL the browser can't reach directly.
+  //
+  // If /health itself fails for any reason (proxy quirk, stale service
+  // worker, etc.) fall back to an arbitrary API endpoint we know the rest
+  // of the app polls successfully. If THAT also fails we genuinely can't
+  // reach the backend.
+  const probe = async (url: string): Promise<boolean> => {
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+  if (await probe('/health')) return true;
+  return probe('/v1/connectors');
 }
 
 export async function fetchEnergy(): Promise<unknown> {
