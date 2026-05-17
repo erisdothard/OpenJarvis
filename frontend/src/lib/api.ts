@@ -192,8 +192,14 @@ export async function checkHealth(): Promise<boolean> {
       return false;
     }
   }
+  // In the browser, ALWAYS hit /health relative to the page origin so the
+  // request flows through whatever path is already serving the SPA — the
+  // Vite proxy in dev, FastAPI's static mount in prod. This avoids the
+  // false-negative "Cannot reach backend" banner when getBase() points at
+  // an absolute URL the browser can't reach directly (e.g. a remote DGX
+  // accessed only via the dev proxy / SSH port-forward).
   try {
-    const res = await fetch(`${getBase()}/health`);
+    const res = await fetch('/health');
     return res.ok;
   } catch {
     return false;
