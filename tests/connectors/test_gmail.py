@@ -681,7 +681,7 @@ def test_non_401_status_is_not_refreshed(tmp_path: Path) -> None:
 
 def test_refresh_raises_when_refresh_token_missing(tmp_path: Path) -> None:
     """Refresh aborts with a clear error when no refresh_token is stored."""
-    from openjarvis.connectors import gmail as gmail_mod
+    from openjarvis.connectors import google_auth
 
     creds_path = tmp_path / "gmail.json"
     creds_path.write_text(
@@ -689,8 +689,8 @@ def test_refresh_raises_when_refresh_token_missing(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(gmail_mod.GmailAuthError, match="refresh_token"):
-        gmail_mod._refresh_access_token(str(creds_path))
+    with pytest.raises(google_auth.GoogleAuthError, match="refresh_token"):
+        google_auth.refresh_access_token(str(creds_path))
 
 
 def test_sync_recovers_when_list_returns_401(tmp_path: Path) -> None:
