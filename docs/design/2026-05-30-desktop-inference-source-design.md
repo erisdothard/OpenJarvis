@@ -108,7 +108,7 @@ Worked examples (using the existing `QWEN35_MODELS` table):
 |-----------:|-------------------------------|--------------------------|
 | 8 GB       | 0.8b, 2b, 4b                  | `qwen3.5:2b`             |
 | 16 GB      | 0.8b, 2b, 4b, 9b              | `qwen3.5:4b`             |
-| 32 GB      | 0.8b, 2b, 4b, 9b, 27b         | `qwen3.5:9b`             |
+| 32 GB      | 0.8b, 2b, 4b, 9b, 27b, 35b    | `qwen3.5:27b`           |
 | 96 GB+     | … up to 122b                  | `qwen3.5:35b`            |
 
 ### 3. Fix #2 — boot branching
