@@ -76,29 +76,24 @@ fn total_ram_gb() -> f64 {
     8.0
 }
 
-/// Return the list of Qwen3.5 models that fit on this machine, smallest first.
-fn models_that_fit() -> Vec<&'static str> {
-    let ram = total_ram_gb();
+/// Return the Qwen3.5 models that fit in `ram_gb`, smallest first.
+fn models_that_fit_in(ram_gb: f64) -> Vec<&'static str> {
     QWEN35_MODELS
         .iter()
-        .filter(|(_, _, min_ram)| ram >= *min_ram)
+        .filter(|(_, _, min_ram)| ram_gb >= *min_ram)
         .map(|(tag, _, _)| *tag)
         .collect()
 }
 
-/// Pick the default model — prefers STARTUP_MODEL if it fits, otherwise
-/// falls back to the third-largest model that fits on this machine.
-fn preferred_model() -> &'static str {
-    let fitting = models_that_fit();
-    // Prefer STARTUP_MODEL when it fits (fast, good quality)
-    if fitting.contains(&STARTUP_MODEL) {
-        return STARTUP_MODEL;
-    }
+/// The default local model: the second-largest Qwen3.5 model that fits in
+/// `ram_gb`. Falls back to the only fitting model, or FALLBACK_MODEL if none
+/// fit. Deliberately NOT the largest — leaves RAM headroom for the OS/app.
+fn default_local_model(ram_gb: f64) -> &'static str {
+    let fitting = models_that_fit_in(ram_gb);
     match fitting.len() {
         0 => FALLBACK_MODEL,
         1 => fitting[0],
-        2 => fitting[0],
-        n => fitting[n - 3], // third-largest
+        n => fitting[n - 2],
     }
 }
 
@@ -848,8 +843,9 @@ async fn boot_backend(backend: SharedBackend, status: SharedStatus) {
         }
     }
 
-    // Start with STARTUP_MODEL (just pulled) or preferred if already available.
-    let pref = preferred_model();
+    // Use the second-largest fitting model; fall back to STARTUP_MODEL or
+    // FALLBACK_MODEL below if it isn't already downloaded.
+    let pref = default_local_model(total_ram_gb());
     let startup_model = if ollama_has_model(pref).await {
         pref
     } else if ollama_has_model(STARTUP_MODEL).await {
@@ -1038,19 +1034,9 @@ async fn boot_backend(backend: SharedBackend, status: SharedStatus) {
         s.detail = "All systems ready.".into();
     }
 
-    // Phase 4: Pull remaining Qwen3.5 models in the background.
-    // The app is already usable with qwen3.5:2b; as each model finishes
-    // it appears in the model list automatically.
-    let fitting = models_that_fit();
-    tokio::spawn(async move {
-        for model in fitting {
-            if model != STARTUP_MODEL && model != FALLBACK_MODEL {
-                if !ollama_has_model(model).await {
-                    let _ = pull_model(model).await;
-                }
-            }
-        }
-    });
+    // No further model downloads. The single default model pulled above is
+    // enough to make the app usable; pulling the rest of the ladder
+    // unprompted (up to qwen3.5:122b ≈ 81 GB) was a reported defect.
 }
 
 // ---------------------------------------------------------------------------
@@ -2014,7 +2000,9 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_uv_sync_failure, format_uv_sync_spawn_error, uv_sync_stderr_tail};
+    use super::{
+        default_local_model, format_uv_sync_failure, format_uv_sync_spawn_error, uv_sync_stderr_tail,
+    };
     use std::path::Path;
 
     #[test]
@@ -2078,5 +2066,20 @@ mod tests {
         assert!(msg.contains("C:\\Users\\me\\.local\\bin\\uv.exe"));
         assert!(msg.contains("/repo"));
         assert!(msg.contains("No such file or directory"));
+    }
+
+    #[test]
+    fn default_local_model_picks_second_largest_that_fits() {
+        // QWEN35_MODELS min_ram ladder: 4,6,8,12,24,32,96 GB
+        assert_eq!(default_local_model(4.0), "qwen3.5:0.8b");  // only one fits
+        assert_eq!(default_local_model(8.0), "qwen3.5:2b");    // fits 0.8/2/4 → 2nd-largest
+        assert_eq!(default_local_model(16.0), "qwen3.5:4b");   // fits ..9b → 2nd-largest
+        assert_eq!(default_local_model(32.0), "qwen3.5:27b");  // fits 0.8/2/4/9/27/35b → 2nd-largest is 27b
+        assert_eq!(default_local_model(128.0), "qwen3.5:35b"); // fits all → 2nd-largest
+    }
+
+    #[test]
+    fn default_local_model_falls_back_when_nothing_fits() {
+        assert_eq!(default_local_model(1.0), super::FALLBACK_MODEL);
     }
 }
