@@ -1598,6 +1598,58 @@ async fn get_cloud_key_status() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!(status))
 }
 
+/// Return the current inference-source config for the Settings UI.
+#[tauri::command]
+async fn get_inference_source() -> Result<InferenceConfig, String> {
+    Ok(read_inference_config())
+}
+
+/// Persist the chosen inference source. `host` is normalized to a bare base
+/// URL. For custom endpoints, an optional API key is stored in cloud-keys.env
+/// under `<ENGINE>_API_KEY`. Applies on next app launch.
+#[tauri::command]
+async fn set_inference_source(
+    kind: String,
+    model: Option<String>,
+    host: Option<String>,
+    engine: Option<String>,
+    api_key: Option<String>,
+) -> Result<(), String> {
+    let kind = match kind.as_str() {
+        "ollama" => SourceKind::Ollama,
+        "custom" => SourceKind::Custom,
+        other => return Err(format!("Unknown inference source kind: {:?}", other)),
+    };
+    let cfg = InferenceConfig {
+        kind,
+        model: model.filter(|m| !m.is_empty()),
+        host: host.map(|h| normalize_host(&h)).filter(|h| !h.is_empty()),
+        engine: engine.filter(|e| !e.is_empty()),
+    };
+    if let SourceKind::Custom = cfg.kind {
+        if cfg.host.is_none() {
+            return Err("A server URL is required for a custom endpoint.".into());
+        }
+        if cfg.model.as_deref().unwrap_or("").is_empty() {
+            return Err("A model name is required for a custom endpoint.".into());
+        }
+        if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+            let engine = cfg
+                .engine
+                .clone()
+                .unwrap_or_else(|| CUSTOM_FALLBACK_ENGINE.to_string());
+            let key_name = format!("{}_API_KEY", engine.to_ascii_uppercase());
+            // Save the key before persisting the config: if the key can't be
+            // written, surface it and DON'T record a custom source whose
+            // credential is missing (which would fail confusingly at runtime).
+            save_cloud_key(key_name, key)
+                .await
+                .map_err(|e| format!("Could not store the API key: {}", e))?;
+        }
+    }
+    write_inference_config(&cfg)
+}
+
 /// Pull a model via Ollama (called from frontend download button).
 #[tauri::command]
 async fn pull_ollama_model(model_name: String) -> Result<serde_json::Value, String> {
@@ -2221,6 +2273,8 @@ pub fn run() {
             delete_ollama_model,
             save_cloud_key,
             get_cloud_key_status,
+            get_inference_source,
+            set_inference_source,
             toggle_overlay,
             hide_overlay,
             get_overlay_conversation,
