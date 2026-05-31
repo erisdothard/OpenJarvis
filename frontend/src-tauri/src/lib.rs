@@ -1211,9 +1211,14 @@ async fn boot_backend(backend: SharedBackend, status: SharedStatus) {
         s.detail = "All systems ready.".into();
     }
 
-    // No further model downloads. The single default model pulled above is
-    // enough to make the app usable; pulling the rest of the ladder
-    // unprompted (up to qwen3.5:122b ≈ 81 GB) was a reported defect.
+    // Phase 4: done. We intentionally do NOT auto-pull the rest of the
+    // Qwen3.5 ladder here. The previous behavior walked every model that
+    // "fit" in RAM (up to qwen3.5:122b ≈ 81 GB) and pulled each one in an
+    // un-cancellable background task — so the app silently consumed tens of
+    // gigabytes with no way to stop short of deleting it. The startup model
+    // pulled in Phase 2 is enough to make the app fully usable; additional
+    // models are now opt-in (Settings → "ollama pull <model>", or the
+    // `pull_model` command invoked from the UI).
 }
 
 // ---------------------------------------------------------------------------
