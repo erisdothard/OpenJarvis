@@ -193,7 +193,7 @@ export async function deleteModel(modelName: string): Promise<void> {
   }
 }
 
-const _CLOUD_PREFIXES = ['gpt-', 'o1-', 'o3-', 'o4-', 'claude-', 'gemini-', 'openrouter/'];
+const _CLOUD_PREFIXES = ['gpt-', 'o1-', 'o3-', 'o4-', 'claude-', 'gemini-', 'openrouter/', 'groq/', 'deepseek/'];
 
 export async function preloadModel(modelName: string): Promise<void> {
   // Cloud models don't need Ollama preloading
@@ -342,6 +342,21 @@ export async function fetchSpeechHealth(): Promise<SpeechHealth> {
   const res = await apiFetch(`/v1/speech/health`);
   if (!res.ok) return { available: false };
   return res.json();
+}
+
+export async function synthesizeSpeech(text: string, voiceId?: string): Promise<Blob> {
+  const res = await apiFetch(`/v1/speech/synthesize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text,
+      voice_id: voiceId || 'af_heart',
+      backend: 'kokoro',
+      speed: 1.0,
+    }),
+  });
+  if (!res.ok) throw new Error(`TTS failed: ${res.status}`);
+  return res.blob();
 }
 
 // ---------------------------------------------------------------------------
@@ -1070,4 +1085,44 @@ export async function setInferenceSource(
     // required…", "Could not store the API key…") as proper Error instances.
     throw new Error(e?.message ?? e ?? 'Failed to save inference source');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Digest / Morning Briefing
+// ---------------------------------------------------------------------------
+
+export interface DigestData {
+  text: string;
+  sections: Record<string, string>;
+  sources_used: string[];
+  generated_at: string;
+  model_used: string;
+  voice_used: string;
+  audio_available: boolean;
+}
+
+export async function fetchDigest(): Promise<DigestData | null> {
+  try {
+    const res = await apiFetch('/api/digest');
+    if (res.status === 404) return null;
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function generateDigest(): Promise<DigestData | null> {
+  try {
+    const res = await apiFetch('/api/digest/generate', { method: 'POST' });
+    if (!res.ok) return null;
+    // After generation, fetch the full digest object
+    return fetchDigest();
+  } catch {
+    return null;
+  }
+}
+
+export function getDigestAudioUrl(): string {
+  return `${getBase()}/api/digest/audio`;
 }

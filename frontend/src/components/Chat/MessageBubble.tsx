@@ -25,15 +25,9 @@ interface Props {
 }
 
 function getTextContent(node: any): string {
-  if (typeof node === 'string' || typeof node === 'number') {
-    return String(node);
-  }
-  if (Array.isArray(node)) {
-    return node.map(getTextContent).join('');
-  }
-  if (node?.props?.children) {
-    return getTextContent(node.props.children);
-  }
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(getTextContent).join('');
+  if (node?.props?.children) return getTextContent(node.props.children);
   return '';
 }
 
@@ -52,20 +46,16 @@ function CodeBlockPre({ children, ...props }: any) {
   };
 
   return (
-    <div
-      className="code-block-wrapper relative my-3"
-      style={{ borderRadius: 'var(--radius-md)', overflow: 'hidden' }}
-    >
-      <div
-        className="flex items-center justify-between px-4 py-1.5 text-xs"
-        style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-tertiary)' }}
-      >
-        <span className="font-mono">{lang || 'code'}</span>
+    <div className="code-block-wrapper relative my-3" style={{ borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid var(--color-border)' }}>
+      <div className="code-block-header flex items-center justify-between px-4 py-2 text-xs">
+        <span className="text-[12px] font-medium" style={{ color: 'var(--color-text-tertiary)' }}>
+          {lang || 'code'}
+        </span>
         <button
           onClick={handleCopy}
-          className="flex items-center gap-1 px-2 py-0.5 rounded transition-colors cursor-pointer"
+          className="flex items-center gap-1.5 px-2 py-0.5 cursor-pointer rounded-md transition-colors text-[12px]"
           style={{ color: 'var(--color-text-tertiary)' }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--color-text-secondary)')}
+          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--color-text)')}
           onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--color-text-tertiary)')}
         >
           {copied ? <Check size={12} /> : <Copy size={12} />}
@@ -81,7 +71,6 @@ function CodeBlockPre({ children, ...props }: any) {
 
 function CopyMessageButton({ content }: { content: string }) {
   const [copied, setCopied] = useState(false);
-
   const handleCopy = () => {
     navigator.clipboard.writeText(content);
     setCopied(true);
@@ -91,11 +80,11 @@ function CopyMessageButton({ content }: { content: string }) {
   return (
     <button
       onClick={handleCopy}
-      className="p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+      className="p-1 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer rounded-md"
       style={{ color: 'var(--color-text-tertiary)' }}
       title="Copy message"
     >
-      {copied ? <Check size={14} /> : <Copy size={14} />}
+      {copied ? <Check size={13} /> : <Copy size={13} />}
     </button>
   );
 }
@@ -105,16 +94,10 @@ export function MessageBubble({ message, isLive = false }: Props) {
 
   if (isUser) {
     return (
-      <div className="flex justify-end mb-4">
+      <div className="flex justify-end mb-5">
         <div
-          className="max-w-[85%] px-4 py-2.5 text-sm leading-relaxed"
-          style={{
-            background: 'var(--color-user-bubble)',
-            color: 'var(--color-user-bubble-text)',
-            borderRadius: 'var(--radius-xl) var(--radius-xl) var(--radius-sm) var(--radius-xl)',
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-          }}
+          className="chroma-bubble max-w-[85%] px-4 py-3 text-[15px] leading-relaxed"
+          style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
         >
           {message.content}
         </div>
@@ -124,8 +107,6 @@ export function MessageBubble({ message, isLive = false }: Props) {
 
   const cleanContent = useMemo(() => stripThinkTags(message.content), [message.content]);
 
-  // Build a ref→source lookup once per render. Memoized so the rehype plugin
-  // identity stays stable until the source list actually changes.
   const sourcesMap = useMemo(() => {
     const m = new Map<number, NonNullable<ChatMessage['researchSources']>[number]>();
     for (const s of message.researchSources ?? []) {
@@ -141,8 +122,8 @@ export function MessageBubble({ message, isLive = false }: Props) {
   }, [sourcesMap]);
 
   return (
-    <div className="group mb-6">
-      {/* Deep Research timeline (steps + status) */}
+    <div className="group mb-7">
+      {/* Deep Research timeline */}
       {(message.isResearch || (message.researchTraces && message.researchTraces.length > 0)) && (
         <ResearchTimeline
           traces={message.researchTraces ?? []}
@@ -160,26 +141,24 @@ export function MessageBubble({ message, isLive = false }: Props) {
         </div>
       )}
 
-      {/* Audio player (e.g. morning digest) */}
+      {/* Audio player */}
       {message.audio?.url && <AudioPlayer src={message.audio.url} />}
 
       {/* Assistant message */}
       {cleanContent && (
-        <div className="prose max-w-none">
+        <div className="prose max-w-none" style={{ paddingLeft: '14px', borderLeft: '2px solid rgba(0, 229, 255, 0.1)' }}>
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={rehypePlugins}
-            components={{
-              pre: CodeBlockPre,
-            }}
+            components={{ pre: CodeBlockPre }}
           >
             {cleanContent}
           </ReactMarkdown>
         </div>
       )}
 
-      {/* Footer: copy + x-ray */}
-      <div className="flex items-center gap-2 mt-1.5">
+      {/* Footer */}
+      <div className="flex items-center gap-2 mt-2" style={{ paddingLeft: '14px' }}>
         <CopyMessageButton content={cleanContent} />
       </div>
       <XRayFooter

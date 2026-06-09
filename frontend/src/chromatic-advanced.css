@@ -1,0 +1,582 @@
+/*
+ * OpenJarvis — Advanced Chromatic Liquid Metal Effects
+ * Cutting-edge CSS techniques for iridescent spectral dispersion.
+ *
+ * Requires: Modern browsers with @property and conic-gradient support
+ * (Chrome 85+, Firefox 117+, Safari 16.4+, Edge 85+)
+ */
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* 1. CSS @property Definitions — Animatable Color Variables */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+/* Chromatic offset for color channel separation (like lens aberration) */
+@property --chroma-offset {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: false;
+}
+
+/* Spectral rotation for iridescent shift */
+@property --spectral-hue {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+/* Glow intensity for ambient effects */
+@property --glow-intensity {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: false;
+}
+
+/* Border travel position (0-100%) */
+@property --border-travel {
+  syntax: '<percentage>';
+  initial-value: 0%;
+  inherits: false;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* 2. Keyframe Animations — Using @property for smooth transitions */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+@keyframes spectral-travel {
+  0% {
+    --border-travel: 0%;
+    --spectral-hue: 0deg;
+  }
+  100% {
+    --border-travel: 100%;
+    --spectral-hue: 360deg;
+  }
+}
+
+@keyframes chromatic-pulse {
+  0%, 100% {
+    --glow-intensity: 0.4;
+    --chroma-offset: 0;
+  }
+  50% {
+    --glow-intensity: 1;
+    --chroma-offset: 2;
+  }
+}
+
+@keyframes void-emerge {
+  0% {
+    opacity: 0;
+    box-shadow: 0 0 0 0 rgba(0, 229, 255, 0);
+  }
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 20px -4px rgba(0, 229, 255, 0.3);
+  }
+}
+
+@keyframes oil-slick {
+  0% {
+    background-position: 0% 0%;
+    filter: hue-rotate(0deg);
+  }
+  25% {
+    background-position: 100% 0%;
+    filter: hue-rotate(90deg);
+  }
+  50% {
+    background-position: 100% 100%;
+    filter: hue-rotate(180deg);
+  }
+  75% {
+    background-position: 0% 100%;
+    filter: hue-rotate(270deg);
+  }
+  100% {
+    background-position: 0% 0%;
+    filter: hue-rotate(360deg);
+  }
+}
+
+@keyframes ambient-glow-shift {
+  0% {
+    background-position: 0% 0%, 100% 100%, 50% 50%;
+  }
+  50% {
+    background-position: 100% 100%, 0% 0%, 50% 50%;
+  }
+  100% {
+    background-position: 0% 0%, 100% 100%, 50% 50%;
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* 3. TECHNIQUE 1: Animated Chromatic/Rainbow Border with @property & Conic */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+.chromatic-border-conic {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.chromatic-border-conic::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  padding: 2px;
+  /* Conic gradient creates 360° spectral wrap — light through prism */
+  background: conic-gradient(
+    from var(--spectral-hue),
+    #ff0080 0deg,
+    #ff6d00 60deg,
+    #ffea00 120deg,
+    #00ff87 180deg,
+    #00e5ff 240deg,
+    #8c00ff 300deg,
+    #ff0080 360deg
+  );
+  animation: spectral-travel 6s linear infinite;
+  z-index: -1;
+  pointer-events: none;
+}
+
+.chromatic-border-conic::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  background: inherit;
+  z-index: -2;
+  pointer-events: none;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* 4. TECHNIQUE 2: Void-Black Cards with Chromatic Prismatic Edges on Hover */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+.chromatic-void-card {
+  position: relative;
+  background: var(--color-bg-secondary);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 16px;
+  padding: 24px;
+  overflow: hidden;
+  transition: border-color 400ms ease, background 400ms ease;
+}
+
+/* At rest: no visible border, pure black void */
+.chromatic-void-card::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  /* Prism-like gradient: spectral light refraction */
+  background: linear-gradient(
+    135deg,
+    rgba(255, 0, 128, 0) 0%,
+    rgba(255, 0, 128, 0.25) 15%,
+    rgba(255, 109, 0, 0.3) 30%,
+    rgba(255, 234, 0, 0.25) 45%,
+    rgba(0, 255, 135, 0.3) 60%,
+    rgba(0, 229, 255, 0.35) 75%,
+    rgba(140, 0, 255, 0.25) 90%,
+    rgba(255, 0, 128, 0) 100%
+  );
+  background-size: 200% 100%;
+  /* Mask to border only (exclude fill) */
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity 400ms cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* Inner glow on hover (very subtle) */
+.chromatic-void-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: calc(16px - 1px);
+  background: radial-gradient(
+    ellipse 80% 60% at 50% 30%,
+    rgba(0, 229, 255, 0.08) 0%,
+    rgba(140, 0, 255, 0.04) 40%,
+    transparent 100%
+  );
+  opacity: 0;
+  transition: opacity 400ms ease;
+  pointer-events: none;
+}
+
+.chromatic-void-card:hover {
+  background: rgba(0, 229, 255, 0.01);
+  border-color: rgba(0, 229, 255, 0.05);
+}
+
+.chromatic-void-card:hover::before {
+  opacity: 1;
+  animation: spectral-travel 3s linear infinite;
+}
+
+.chromatic-void-card:hover::after {
+  opacity: 1;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* 5. TECHNIQUE 3: Subtle Chromatic Ambient Glow (Background) */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+.chromatic-ambient-glow {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  /* Three animated radial glows at different positions */
+  background:
+    /* Cyan glow (top-left) */
+    radial-gradient(
+      ellipse 70% 50% at 20% 15%,
+      rgba(0, 229, 255, 0.06) 0%,
+      rgba(0, 229, 255, 0.02) 30%,
+      transparent 70%
+    ),
+    /* Violet glow (bottom-right) */
+    radial-gradient(
+      ellipse 60% 60% at 80% 85%,
+      rgba(140, 0, 255, 0.05) 0%,
+      rgba(140, 0, 255, 0.01) 35%,
+      transparent 70%
+    ),
+    /* Magenta glow (center, subtle) */
+    radial-gradient(
+      ellipse 50% 40% at 50% 50%,
+      rgba(255, 0, 128, 0.02) 0%,
+      transparent 60%
+    );
+  background-size:
+    150% 150%,
+    140% 140%,
+    200% 200%;
+  background-position:
+    0% 0%,
+    100% 100%,
+    50% 50%;
+  animation: ambient-glow-shift 20s ease-in-out infinite;
+}
+
+/* Faster variant for hover zones */
+.chromatic-ambient-glow.active {
+  animation: ambient-glow-shift 12s ease-in-out infinite;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* 6. TECHNIQUE 4: Animated Spectral Border (Oil-Slick/Soap-Bubble) */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+.chromatic-spectral-border {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.chromatic-spectral-border::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  padding: 2px;
+  /* Full spectrum gradient that travels */
+  background: linear-gradient(
+    90deg,
+    #ff0080 0%,
+    #ff6d00 16.6%,
+    #ffea00 33.2%,
+    #00ff87 49.8%,
+    #00e5ff 66.4%,
+    #8c00ff 83%,
+    #ff0080 100%
+  );
+  background-size: 300% 100%;
+  background-position: 0% 0%;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: oil-slick 8s linear infinite;
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* 7. ADVANCED: Chromatic Aberration Effect (RGB Separation) */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+.chromatic-aberration {
+  position: relative;
+  /* Create layered text with offset color channels */
+}
+
+.chromatic-aberration::before,
+.chromatic-aberration::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  opacity: 0.3;
+  mix-blend-mode: screen;
+  pointer-events: none;
+}
+
+.chromatic-aberration::before {
+  color: #ff0080;
+  transform: translateX(-2px) translateY(-2px);
+}
+
+.chromatic-aberration::after {
+  color: #00e5ff;
+  transform: translateX(2px) translateY(2px);
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* 8. ADVANCED: Chromatic Glow with Hue Rotation */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+.chromatic-rotating-glow {
+  position: relative;
+}
+
+.chromatic-rotating-glow::before {
+  content: '';
+  position: absolute;
+  inset: -8px;
+  border-radius: inherit;
+  background: radial-gradient(
+    circle,
+    rgba(0, 229, 255, 0.4) 0%,
+    rgba(0, 229, 255, 0) 70%
+  );
+  opacity: 0;
+  animation: chromatic-pulse 4s ease-in-out infinite;
+  filter: hue-rotate(var(--spectral-hue));
+  pointer-events: none;
+  z-index: -1;
+}
+
+.chromatic-rotating-glow:hover::before {
+  opacity: 1;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* 9. ADVANCED: Conic-Gradient Ring (360° Spectral Halo) */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+.chromatic-spectral-ring {
+  position: relative;
+  border-radius: 50%;
+  width: 200px;
+  height: 200px;
+}
+
+.chromatic-spectral-ring::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  padding: 3px;
+  background: conic-gradient(
+    from 0deg,
+    #ff0080,
+    #ff6d00 60deg,
+    #ffea00 120deg,
+    #00ff87 180deg,
+    #00e5ff 240deg,
+    #8c00ff 300deg,
+    #ff0080
+  );
+  animation: spectral-travel 4s linear infinite;
+  -webkit-mask:
+    radial-gradient(farthest-side, #fff 95%, transparent 100%);
+  mask:
+    radial-gradient(farthest-side, #fff 95%, transparent 100%);
+  pointer-events: none;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* 10. ADVANCED: Multi-Layer Liquid Metal Panel */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+.chromatic-liquid-metal {
+  position: relative;
+  background: #000000;
+  border-radius: 16px;
+  overflow: hidden;
+  padding: 2px;
+}
+
+/* Outer chromatic border */
+.chromatic-liquid-metal::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    135deg,
+    rgba(255, 0, 128, 0.4),
+    rgba(255, 109, 0, 0.3),
+    rgba(255, 234, 0, 0.2),
+    rgba(0, 255, 135, 0.3),
+    rgba(0, 229, 255, 0.4),
+    rgba(140, 0, 255, 0.3),
+    rgba(255, 0, 128, 0.4)
+  );
+  background-size: 300% 300%;
+  background-position: 0% 0%;
+  animation: spectral-travel 5s ease-in-out infinite;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0.6;
+  transition: opacity 400ms ease;
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* Inner shimmer glow */
+.chromatic-liquid-metal::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: calc(16px - 2px);
+  background: radial-gradient(
+    ellipse 100% 50% at 50% 0%,
+    rgba(0, 229, 255, 0.15) 0%,
+    rgba(0, 229, 255, 0.05) 30%,
+    transparent 100%
+  );
+  opacity: 0;
+  transition: opacity 400ms ease;
+  pointer-events: none;
+}
+
+.chromatic-liquid-metal:hover::before {
+  opacity: 1;
+}
+
+.chromatic-liquid-metal:hover::after {
+  opacity: 1;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* 11. Composite: Full Void-to-Prism Button */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+.chromatic-button-void {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 32px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  background: #000000;
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  transition: all 300ms cubic-bezier(0.16, 1, 0.3, 1);
+  overflow: hidden;
+}
+
+.chromatic-button-void::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from 0deg,
+    rgba(255, 0, 128, 0) 0deg,
+    rgba(255, 0, 128, 0.3) 45deg,
+    rgba(0, 229, 255, 0.4) 90deg,
+    rgba(255, 0, 128, 0.3) 135deg,
+    rgba(255, 0, 128, 0) 180deg
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity 300ms ease;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.chromatic-button-void::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(
+    ellipse 100% 50% at 50% 50%,
+    rgba(0, 229, 255, 0.1) 0%,
+    transparent 70%
+  );
+  opacity: 0;
+  transition: opacity 300ms ease;
+  pointer-events: none;
+}
+
+.chromatic-button-void:hover {
+  background: rgba(0, 229, 255, 0.02);
+  border-color: rgba(0, 229, 255, 0.1);
+  color: #00e5ff;
+}
+
+.chromatic-button-void:hover::before {
+  opacity: 1;
+  animation: spectral-travel 2s linear infinite;
+}
+
+.chromatic-button-void:hover::after {
+  opacity: 1;
+}
+
+.chromatic-button-void:active {
+  transform: scale(0.96);
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* 12. Reduced Motion Accessibility */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .chromatic-border-conic::before,
+  .chromatic-void-card::before,
+  .chromatic-ambient-glow,
+  .chromatic-spectral-border::before,
+  .chromatic-rotating-glow::before,
+  .chromatic-spectral-ring::before,
+  .chromatic-liquid-metal::before,
+  .chromatic-button-void::before {
+    animation: none !important;
+    opacity: 0.5;
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* 13. Dark/Light Theme Support */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+/* Dark-only app — no light theme override needed */

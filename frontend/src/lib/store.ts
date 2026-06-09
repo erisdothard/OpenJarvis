@@ -38,6 +38,7 @@ const OPTIN_NAME_KEY = 'openjarvis-display-name';
 const OPTIN_EMAIL_KEY = 'openjarvis-email';
 const OPTIN_ANONID_KEY = 'openjarvis-anon-id';
 const OPTIN_SEEN_KEY = 'openjarvis-optin-seen';
+const SPEECH_MIGRATED_KEY = 'openjarvis-speech-migrated';
 
 interface ConversationStore {
   version: 1;
@@ -92,12 +93,22 @@ function loadSettings(): Settings {
     defaultAgent: '',
     temperature: 0.7,
     maxTokens: 4096,
-    speechEnabled: false,
+    speechEnabled: true,
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return defaults;
-    return { ...defaults, ...JSON.parse(raw) };
+    const merged = { ...defaults, ...JSON.parse(raw) };
+
+    // One-time migration: override stale speechEnabled=false from before
+    // the default was flipped to true.
+    if (!localStorage.getItem(SPEECH_MIGRATED_KEY)) {
+      merged.speechEnabled = true;
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
+      localStorage.setItem(SPEECH_MIGRATED_KEY, '1');
+    }
+
+    return merged;
   } catch {
     return defaults;
   }
@@ -232,6 +243,16 @@ interface AppState {
   // Model loading
   modelLoading: boolean;
   setModelLoading: (loading: boolean) => void;
+
+  // Briefing
+  briefing: {
+    status: 'idle' | 'loading' | 'generating' | 'ready' | 'speaking' | 'error';
+    text: string | null;
+    error: string | null;
+  };
+  setBriefingStatus: (status: AppState['briefing']['status']) => void;
+  setBriefingText: (text: string | null) => void;
+  setBriefingError: (error: string | null) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => {
@@ -519,6 +540,15 @@ export const useAppStore = create<AppState>((set, get) => {
     // ── Model loading ───────────────────────────────────────────────
     modelLoading: false,
     setModelLoading: (loading) => set({ modelLoading: loading }),
+
+    // ── Briefing ────────────────────────────────────────────────────
+    briefing: { status: 'idle', text: null, error: null },
+    setBriefingStatus: (status) =>
+      set((s) => ({ briefing: { ...s.briefing, status } })),
+    setBriefingText: (text) =>
+      set((s) => ({ briefing: { ...s.briefing, text, status: 'ready' } })),
+    setBriefingError: (error) =>
+      set((s) => ({ briefing: { ...s.briefing, error, status: 'error' } })),
 
     // ── Opt-in sharing ──────────────────────────────────────────────
 

@@ -9,12 +9,12 @@ interface Props {
 function formatRelativeTime(timestamp: number): string {
   const diff = Date.now() - timestamp;
   const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return 'Just now';
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 1) return 'now';
+  if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return `${hours}h`;
   const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
+  if (days < 7) return `${days}d`;
   return new Date(timestamp).toLocaleDateString();
 }
 
@@ -33,8 +33,8 @@ export function ConversationList({ searchQuery }: Props) {
 
   if (filtered.length === 0) {
     return (
-      <div className="px-3 py-8 text-center text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
-        {searchQuery ? 'No matching chats' : 'No conversations yet'}
+      <div className="px-3 py-8 text-center text-[13px]" style={{ color: 'var(--color-text-tertiary)' }}>
+        {searchQuery ? 'No matches' : 'No conversations yet'}
       </div>
     );
   }
@@ -46,12 +46,12 @@ export function ConversationList({ searchQuery }: Props) {
         return (
           <div
             key={conv.id}
-            className="group flex items-center rounded-lg cursor-pointer transition-colors"
+            className="group flex items-center cursor-pointer rounded-lg transition-colors"
             style={{
-              background: isActive ? 'var(--color-bg-tertiary)' : 'transparent',
+              background: isActive ? 'rgba(0, 229, 255, 0.05)' : 'transparent',
             }}
             onMouseEnter={(e) => {
-              if (!isActive) e.currentTarget.style.background = 'var(--color-bg-secondary)';
+              if (!isActive) e.currentTarget.style.background = 'rgba(255, 255, 255, 0.03)';
             }}
             onMouseLeave={(e) => {
               if (!isActive) e.currentTarget.style.background = 'transparent';
@@ -60,17 +60,14 @@ export function ConversationList({ searchQuery }: Props) {
             <button
               onClick={() => {
                 selectConversation(conv.id);
-                navigate('/');
+                navigate('/chat');
               }}
               className="flex-1 text-left px-3 py-2 min-w-0 cursor-pointer"
             >
-              <div
-                className="text-sm truncate"
-                style={{
-                  color: isActive ? 'var(--color-text)' : 'var(--color-text-secondary)',
-                  fontWeight: isActive ? 500 : 400,
-                }}
-              >
+              <div className="text-[13px] truncate" style={{
+                color: isActive ? 'var(--color-text-bright)' : 'var(--color-text-secondary)',
+                fontWeight: isActive ? 500 : 400,
+              }}>
                 {conv.title}
               </div>
               <div className="text-[11px] mt-0.5" style={{ color: 'var(--color-text-tertiary)' }}>
@@ -82,13 +79,13 @@ export function ConversationList({ searchQuery }: Props) {
                 e.stopPropagation();
                 deleteConversation(conv.id);
               }}
-              className="p-1.5 mr-1 rounded opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+              className="p-1.5 mr-1.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer rounded-md"
               style={{ color: 'var(--color-text-tertiary)' }}
               onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--color-error)')}
               onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--color-text-tertiary)')}
-              title="Delete conversation"
+              title="Delete"
             >
-              <Trash2 size={14} />
+              <Trash2 size={13} />
             </button>
           </div>
         );

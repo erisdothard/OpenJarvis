@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 import uuid
-from typing import Any
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -25,6 +27,31 @@ from openjarvis.server.models import (
 )
 
 router = APIRouter()
+logger = logging.getLogger("openjarvis.server")
+
+
+def _get_registered_tools_openai() -> List[Dict[str, Any]]:
+    """Convert all ToolRegistry entries to OpenAI function-calling format."""
+    from openjarvis.core.registry import ToolRegistry
+
+    tools: List[Dict[str, Any]] = []
+    for key, tool_cls in ToolRegistry.items():
+        try:
+            instance = tool_cls() if callable(tool_cls) else tool_cls
+            spec = instance.spec if hasattr(instance, "spec") else None
+            if spec is None:
+                continue
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "parameters": spec.parameters or {"type": "object", "properties": {}},
+                },
+            })
+        except Exception:
+            continue
+    return tools
 
 
 def _to_messages(chat_messages) -> list[Message]:
@@ -41,6 +68,22 @@ def _to_messages(chat_messages) -> list[Message]:
             )
         )
     return messages
+
+
+def _store_chat_turn(memory_backend, user_query: str, assistant_content: str, model: str) -> None:
+    """Store a chat turn in the knowledge store for future retrieval."""
+    if not memory_backend or not user_query or not assistant_content:
+        return
+    try:
+        chunk_text = f"Q: {user_query}\nA: {assistant_content}"
+        memory_backend.store(
+            chunk_text,
+            source="chat",
+            doc_type="conversation",
+            metadata={"model": model},
+        )
+    except Exception:
+        logger.debug("Memory store after chat failed", exc_info=True)
 
 
 @router.post("/v1/chat/completions")
@@ -103,13 +146,16 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                 exc_info=True,
             )
 
-    # Run complexity analysis on the last user message
-    complexity_info = None
-    query_text_for_complexity = ""
+    # Extract user query for complexity analysis and post-chat memory storage
+    query_text_for_memory = ""
     for m in reversed(request_body.messages):
         if m.role == "user" and m.content:
-            query_text_for_complexity = m.content
+            query_text_for_memory = m.content
             break
+
+    # Run complexity analysis on the last user message
+    complexity_info = None
+    query_text_for_complexity = query_text_for_memory
     if query_text_for_complexity:
         try:
             from openjarvis.learning.routing.complexity import (
@@ -138,18 +184,17 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
             )
 
     if request_body.stream:
-        # When the client passes `tools`, stream the model's raw
-        # OpenAI-compat function-calling decision directly from the engine
-        # (bypassing the agent) — the streaming mirror of the non-streaming
-        # #454 fix.  Routing tools through the agent stream bridge ignored
-        # `request_body.tools`, ran the agent's own tool loop, and
-        # word-split generic filler content into fake token deltas, so the
-        # caller's tool_calls were dropped entirely (the streaming analog of
-        # #414).  For plain chat (no tools), stream token-by-token directly
-        # from the engine for true real-time output.
+        # Auto-inject registered tools when the client doesn't pass any.
+        # This enables the main chat UI to call tools (calendar, email, etc.)
+        # without needing the frontend to know about every tool definition.
+        if not request_body.tools:
+            auto_tools = _get_registered_tools_openai()
+            if auto_tools:
+                request_body.tools = auto_tools
+
         if request_body.tools:
-            return await _handle_stream_tools(
-                engine, model, request_body, complexity_info
+            return await _handle_stream_with_tool_loop(
+                engine, model, request_body, request, complexity_info
             )
         return await _handle_stream(engine, model, request_body, complexity_info)
 
@@ -170,16 +215,32 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     # the agent to execute them), add an explicit opt-in header rather
     # than removing this guard — silent re-routing is what produced #414.
     if agent is not None and not request_body.tools:
-        return _handle_agent(agent, model, request_body, complexity_info)
+        resp = _handle_agent(agent, model, request_body, complexity_info)
+        if memory_backend and resp.choices:
+            _store_chat_turn(
+                memory_backend,
+                query_text_for_memory,
+                resp.choices[0].message.content or "",
+                model,
+            )
+        return resp
 
     bus = getattr(request.app.state, "bus", None)
-    return _handle_direct(
+    resp = _handle_direct(
         engine,
         model,
         request_body,
         bus=bus,
         complexity_info=complexity_info,
     )
+    if memory_backend and resp.choices:
+        _store_chat_turn(
+            memory_backend,
+            query_text_for_memory,
+            resp.choices[0].message.content or "",
+            model,
+        )
+    return resp
 
 
 def _handle_direct(
@@ -309,6 +370,212 @@ def _handle_agent(
         ],
         usage=usage,
         complexity=complexity_info,
+    )
+
+
+async def _handle_stream_with_tool_loop(
+    engine,
+    model: str,
+    req: ChatCompletionRequest,
+    request: Request,
+    complexity_info=None,
+):
+    """Stream with automatic server-side tool execution loop.
+
+    When the model emits tool_calls, this handler:
+    1. Executes them server-side using ToolRegistry
+    2. Emits tool_call_start/tool_call_end SSE events (frontend already renders these)
+    3. Feeds tool results back to the model
+    4. Streams the final text response
+
+    Max 5 turns to prevent infinite loops.
+    """
+    from openjarvis.core.registry import ToolRegistry
+    from openjarvis.server.cloud_router import is_cloud_model
+
+    messages = _to_messages(req.messages)
+    chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    use_cloud = is_cloud_model(model)
+    app_state = request.app.state
+
+    async def generate():
+        nonlocal messages
+        MAX_TOOL_TURNS = 5
+
+        # Send role chunk first (OpenAI convention)
+        first_chunk = ChatCompletionChunk(
+            id=chunk_id,
+            model=model,
+            choices=[StreamChoice(delta=DeltaMessage(role="assistant"))],
+        )
+        yield f"data: {first_chunk.model_dump_json()}\n\n"
+
+        for _turn in range(MAX_TOOL_TURNS):
+            # Collect the full response (content + tool_calls) from this turn
+            turn_content = ""
+            tool_call_fragments: Dict[int, Dict[str, Any]] = {}
+            finish_reason = "stop"
+
+            try:
+                async for sc in engine.stream_full(
+                    messages,
+                    model=model,
+                    temperature=req.temperature,
+                    max_tokens=req.max_tokens,
+                    tools=req.tools,
+                ):
+                    if sc.content:
+                        turn_content += sc.content
+                        # Stream content tokens to client in real time
+                        content_chunk = ChatCompletionChunk(
+                            id=chunk_id,
+                            model=model,
+                            choices=[StreamChoice(delta=DeltaMessage(content=sc.content))],
+                        )
+                        yield f"data: {content_chunk.model_dump_json()}\n\n"
+                    if sc.tool_calls:
+                        # Accumulate tool call fragments
+                        for tc in sc.tool_calls:
+                            idx = tc.get("index", 0)
+                            if idx not in tool_call_fragments:
+                                tool_call_fragments[idx] = {
+                                    "id": tc.get("id", ""),
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                }
+                            frag = tool_call_fragments[idx]
+                            fn = tc.get("function", {})
+                            if fn.get("name"):
+                                frag["function"]["name"] = fn["name"]
+                            if fn.get("arguments"):
+                                frag["function"]["arguments"] += fn["arguments"]
+                            if tc.get("id"):
+                                frag["id"] = tc["id"]
+                    if sc.finish_reason:
+                        finish_reason = sc.finish_reason
+            except Exception as exc:
+                logger.error("Tool-loop stream error: %s", exc, exc_info=True)
+                error_chunk = ChatCompletionChunk(
+                    id=chunk_id,
+                    model=model,
+                    choices=[StreamChoice(
+                        delta=DeltaMessage(content=f"\n\nError: {exc}"),
+                        finish_reason="stop",
+                    )],
+                )
+                yield f"data: {error_chunk.model_dump_json()}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            # If no tool calls, this is the final response — done
+            if not tool_call_fragments:
+                break
+
+            # --- Execute tool calls server-side ---
+            sorted_tcs = [tool_call_fragments[i] for i in sorted(tool_call_fragments.keys())]
+
+            # Append assistant message with tool_calls to conversation
+            from openjarvis.core.types import ToolCall as MsgToolCall
+
+            assistant_msg = Message(
+                role=Role.ASSISTANT,
+                content=turn_content or None,
+                tool_calls=[
+                    MsgToolCall(
+                        id=tc["id"],
+                        name=tc["function"]["name"],
+                        arguments=tc["function"]["arguments"],
+                    )
+                    for tc in sorted_tcs
+                ],
+            )
+            messages.append(assistant_msg)
+
+            for tc in sorted_tcs:
+                tool_name = tc["function"]["name"]
+                tool_args = tc["function"]["arguments"]
+                tool_result_content = f"Tool '{tool_name}' not available"
+                tool_succeeded = False
+
+                # Emit tool_call_start SSE event
+                start_payload = json.dumps({"tool": tool_name, "arguments": tool_args})
+                yield f"event: tool_call_start\ndata: {start_payload}\n\n"
+
+                tool_start = time.monotonic()
+                try:
+                    tool_cls = ToolRegistry.get(tool_name)
+                    if tool_cls is not None:
+                        from openjarvis.server.agent_manager_routes import (
+                            _instantiate_managed_tool,
+                        )
+
+                        tool_instance = _instantiate_managed_tool(
+                            tool_cls,
+                            tool_name,
+                            engine=engine,
+                            model=model,
+                            app_state=app_state,
+                        )
+                        try:
+                            parsed_args = json.loads(tool_args) if tool_args else {}
+                        except (json.JSONDecodeError, TypeError):
+                            parsed_args = {}
+                        result = tool_instance.execute(**parsed_args)
+                        tool_result_content = result.content
+                        tool_succeeded = True
+                except Exception as tool_exc:
+                    logger.error("Tool exec error %s: %s", tool_name, tool_exc, exc_info=True)
+                    tool_result_content = f"Error: {tool_exc}"
+
+                tool_latency = (time.monotonic() - tool_start) * 1000
+
+                # Emit tool_call_end SSE event
+                end_payload = json.dumps({
+                    "tool": tool_name,
+                    "success": tool_succeeded,
+                    "latency": tool_latency,
+                    "result": tool_result_content[:2000],
+                })
+                yield f"event: tool_call_end\ndata: {end_payload}\n\n"
+
+                # Add tool result to conversation for next model turn
+                messages.append(Message(
+                    role=Role.TOOL,
+                    content=tool_result_content,
+                    tool_call_id=tc["id"],
+                    name=tool_name,
+                ))
+
+            # Loop back — model gets tool results and generates next turn
+
+        # Store conversation turn in memory
+        _mem = getattr(app_state, "memory_backend", None)
+        if _mem and turn_content:
+            _user_q = ""
+            for _m in reversed(req.messages):
+                if _m.role == "user" and _m.content:
+                    _user_q = _m.content
+                    break
+            _store_chat_turn(_mem, _user_q, turn_content, model)
+
+        # Send finish chunk
+        finish_data = ChatCompletionChunk(
+            id=chunk_id,
+            model=model,
+            choices=[StreamChoice(delta=DeltaMessage(), finish_reason="stop")],
+        )
+        finish_dict = json.loads(finish_data.model_dump_json())
+        finish_dict.setdefault("telemetry", {})
+        finish_dict["telemetry"]["engine"] = "cloud" if use_cloud else "ollama"
+        if complexity_info is not None:
+            finish_dict["complexity"] = complexity_info.model_dump()
+        yield f"data: {json.dumps(finish_dict)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
 
 
@@ -480,6 +747,9 @@ async def _handle_stream(
                         _routed = _inner._engine_for(model)
                         if _routed is not None and getattr(_routed, "is_cloud", False):
                             _use_local_fallback = True
+                    elif getattr(_inner, "is_cloud", False):
+                        # Plain cloud engine with a local model — route to Ollama
+                        _use_local_fallback = True
                 except Exception:
                     pass
                 if _use_local_fallback:

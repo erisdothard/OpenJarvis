@@ -1,37 +1,37 @@
-# OpenJarvis configuration — GLM-4.7-Flash eval on 8x A100-80GB
+# OpenJarvis — Eris Dothard daily-driver configuration
+# Nashville, TN | Apple Silicon | Cloud primary, local fallback
 
 # ═══════════════════════════════════════════════════════════════
 # PILLAR 1: Intelligence — The Model
 # ═══════════════════════════════════════════════════════════════
 [intelligence]
-default_model = "zai-org/GLM-4.7-Flash"   # HuggingFace model ID
-fallback_model = "glm-4.7-flash"          # Catalog alias fallback
-preferred_engine = "vllm"                 # MoE model, vLLM is best for A100s
-provider = "local"                        # Running locally on this machine
-quantization = "none"                     # Full precision, we have 640GB VRAM
-# Generation defaults for eval
-temperature = 0.0                         # Deterministic for reproducibility
-max_tokens = 2048                         # Standard eval output length
-top_p = 0.9
-top_k = 40
+default_model = "gemini-2.5-flash"           # Free tier via Google AI Studio
+fallback_model = "qwen3:8b"                  # Local fallback via Ollama
+model_fallback_chain = "groq/llama-3.3-70b-versatile,gemini-2.5-flash,qwen3:8b"  # Groq first (free + fast), Gemini backup, local last
+preferred_engine = "cloud"                   # Cloud-first for quality
+provider = "google"                          # Google AI Studio (free)
+temperature = 0.7                            # Conversational, not deterministic
+max_tokens = 4096                            # Generous output for assistant tasks
+top_p = 0.95
 repetition_penalty = 1.0
 
 # ═══════════════════════════════════════════════════════════════
 # PILLAR 2: Agent — The Agentic Harness
 # ═══════════════════════════════════════════════════════════════
 [agent]
-default_agent = "native_openhands"        # CodeAct-style agent
-max_turns = 10                            # Up to 10 tool-calling turns
-tools = "code_interpreter,web_search,file_read,calculator,think"
-objective = "Answer questions accurately using available tools"
-context_from_memory = false               # No memory injection during eval
+default_agent = "orchestrator"               # Full orchestrator with tool routing
+system_prompt = ""                           # Blank — persona comes from SOUL.md/USER.md via system_prompt.prefix
+max_turns = 15                               # More turns for complex personal tasks
+tools = "code_interpreter,web_search,file_read,file_write,calculator,think,retrieval,memory_manage,channel_send,digest_collect,browser,http_request,knowledge_search"
+objective = "Personal AI assistant — manage email, calendar, tasks, health insights, news, and daily workflow"
+context_from_memory = true                   # Inject relevant memory into every prompt
 
 # ═══════════════════════════════════════════════════════════════
 # PILLAR 3: Tools — MCP Interface
 # ═══════════════════════════════════════════════════════════════
 [tools.storage]
-default_backend = "sqlite"
-db_path = "~/.openjarvis/memory.db"
+default_backend = "knowledge"
+db_path = "~/.openjarvis/knowledge.db"
 
 [tools.mcp]
 enabled = true
@@ -40,53 +40,145 @@ enabled = true
 # PILLAR 4: Engine — The Inference Runtime
 # ═══════════════════════════════════════════════════════════════
 [engine]
-default = "vllm"
+default = "cloud"                            # Cloud primary
 
-[engine.vllm]
-host = "http://localhost:8001"            # vLLM serving port
+[engine.cloud]
+# API key loaded from ANTHROPIC_API_KEY env var
+provider = "anthropic"
 
 [engine.ollama]
-host = "http://localhost:11434"
+host = "http://localhost:11434"              # Local fallback
 
-[engine.sglang]
-host = "http://localhost:30000"
+[engine.litellm]
+# Groq, Together, Fireworks, etc. via LiteLLM
+# Model format: "groq/llama-3.1-70b-versatile", "groq/llama-3.3-70b-versatile"
+# API key loaded from GROQ_API_KEY env var
 
-[engine.llamacpp]
-host = "http://localhost:8080"
-
-[engine.exo]
-host = "http://localhost:52415"
-
-[engine.nexa]
-host = "http://localhost:18181"
-# device = "npu"  # optional: cpu, gpu, npu
-
-[engine.uzu]
-host = "http://localhost:8080"
+[engine.mlx]
+# Apple Silicon native inference (for offline/fast local use)
 
 [engine.apple_fm]
-host = "http://localhost:8079"
+host = "http://localhost:8079"               # Apple Foundation Models (macOS 26+)
 
 # ═══════════════════════════════════════════════════════════════
 # PILLAR 5: Learning — Improvement Methodologies
 # ═══════════════════════════════════════════════════════════════
 [learning]
-enabled = false                           # No learning during eval
+enabled = true                               # Learn from interactions
+training_enabled = true                      # Enable trace->learn->eval pipeline
 
 [learning.routing]
-policy = "heuristic"
+policy = "heuristic"                         # Start heuristic, upgrade to learned later
 
 [learning.intelligence]
-policy = "none"
+policy = "none"                              # No fine-tuning yet
 
 [learning.agent]
-policy = "none"
+policy = "dspy"                              # DSPy prompt optimization from traces
 
 [learning.metrics]
-accuracy_weight = 0.6
+accuracy_weight = 0.5
 latency_weight = 0.2
-cost_weight = 0.1
-efficiency_weight = 0.1
+cost_weight = 0.15
+efficiency_weight = 0.15
+
+# ═══════════════════════════════════════════════════════════════
+# Speech — Voice I/O
+# ═══════════════════════════════════════════════════════════════
+[speech]
+backend = "faster-whisper"                  # Local STT (no API key needed)
+model = "base"                              # Whisper model: tiny, base, small, medium, large-v3
+device = "auto"                             # auto, cpu, cuda
+compute_type = "int8"                       # int8 for Apple Silicon (float16 not supported)
+tts_backend = "cartesia"                    # Cartesia Sonic — fast, high-quality
+tts_voice_id = "a0e99841-438c-4a64-b679-ae501e7d6091"  # British Butler (Jarvis)
+tts_speed = 1.0
+tts_language = "en"
+
+# ═══════════════════════════════════════════════════════════════
+# Morning Digest
+# ═══════════════════════════════════════════════════════════════
+[digest]
+enabled = true
+schedule = "0 6 * * *"                       # 6:00 AM daily
+timezone = "America/Chicago"                 # Nashville, TN = Central Time
+persona = "eris"                             # Custom persona
+honorific = "Eris"                           # Use first name, not "sir"
+voice_speed = 1.0
+tts_backend = "cartesia"
+sections = ["messages", "calendar", "health", "world"]
+
+[digest.messages]
+sources = ["gmail", "imessage", "slack", "github_notifications"]
+priority_contacts = []                       # Add key contacts here
+
+[digest.calendar]
+sources = ["gcalendar"]
+
+[digest.health]
+sources = ["apple_health"]
+
+[digest.world]
+sources = ["weather", "hackernews", "news_rss"]
+
+# ═══════════════════════════════════════════════════════════════
+# Memory & Persona
+# ═══════════════════════════════════════════════════════════════
+[memory_files]
+soul_path = "~/.openjarvis/SOUL.md"
+memory_path = "~/.openjarvis/MEMORY.md"
+user_path = "~/.openjarvis/USER.md"
+nudge_interval = 10
+
+[system_prompt]
+prefix = "You are Jarvis, personal AI assistant to Eris Dothard (30, Nashville TN, Central Time). Eris is an AI consultant and full-stack developer co-founding an AI consulting firm with her father. Active projects: FreightX ($10K freight marketplace for 3 Aces Trucking), job search (Implementation Engineer, Seismic pipeline), CCA Foundations certification. Stack: React, Next.js, TypeScript, Python/FastAPI, Supabase, Claude API. Be proactive, anticipate needs, connect dots across email/calendar/tasks/health. Prioritize actionable insights over information dumps."
+
+# ═══════════════════════════════════════════════════════════════
+# Connectors (data sources to sync)
+# ═══════════════════════════════════════════════════════════════
+[connectors]
+sync_interval = 3600                     # Re-sync all connected sources every hour
+
+[connectors.gmail]
+enabled = true
+
+[connectors.gcalendar]
+enabled = true
+
+[connectors.apple_health]
+enabled = true
+
+[connectors.weather]
+enabled = true
+location = "Nashville, TN"
+
+[connectors.hackernews]
+enabled = true
+max_stories = 10
+
+[connectors.news_rss]
+enabled = true
+
+[connectors.github_notifications]
+enabled = true
+
+[connectors.obsidian]
+enabled = true
+vault_path = "/Users/erisdothard/Documents/Obsidian Vault"
+
+[connectors.instagram]
+enabled = true
+
+[connectors.facebook]
+enabled = true
+
+[connectors.outlook]
+enabled = true
+
+[connectors.budget]
+enabled = true
+# transactions_dir = "~/.openjarvis/connectors/budget"
+# Drop CSV/JSON bank exports here, or set PLAID_* env vars for auto-sync
 
 # ═══════════════════════════════════════════════════════════════
 # Supporting config
@@ -94,18 +186,25 @@ efficiency_weight = 0.1
 [telemetry]
 enabled = true
 db_path = "~/.openjarvis/telemetry.db"
-gpu_metrics = true
-gpu_poll_interval_ms = 50
-energy_vendor = ""                       # Auto-detect; or force "nvidia"/"amd"/"apple"/"cpu_rapl"
-warmup_samples = 0                       # Warmup iterations before steady-state measurement
-steady_state_window = 5                  # Sliding window size for CV stability check
-steady_state_threshold = 0.05            # Coefficient of variation threshold for steady state
+gpu_metrics = false                          # No discrete GPU on Apple Silicon
+energy_vendor = "apple"                      # Apple Silicon energy tracking
 
 [traces]
-enabled = true                            # Record traces for analysis
+enabled = true
 db_path = "~/.openjarvis/traces.db"
 
 [server]
-host = "0.0.0.0"
+host = "127.0.0.1"                           # Localhost only (security)
 port = 8000
-agent = "native_openhands"
+agent = "orchestrator"
+
+[sessions]
+persist = true
+db_path = "~/.openjarvis/sessions.db"
+
+[channel]
+enabled = true
+default_channel = "webchat"
+
+[scheduler]
+enabled = true                               # Enable cron-based digest scheduling

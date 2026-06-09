@@ -562,6 +562,7 @@ class IntelligenceConfig:
 
     default_model: str = ""
     fallback_model: str = ""
+    model_fallback_chain: str = ""  # Comma-separated: "gemini-2.5-flash,qwen3:8b"
     model_path: str = ""  # Local weights (HF repo, GGUF file, etc.)
     checkpoint_path: str = ""  # Checkpoint/adapter path
     quantization: str = "none"  # none, fp8, int8, int4, gguf_q4, gguf_q8
@@ -1395,7 +1396,7 @@ class SpeechConfig:
     model: str = "base"  # Whisper model size: tiny, base, small, medium, large-v3
     language: str = ""  # Empty = auto-detect
     device: str = "auto"  # "auto", "cpu", "cuda"
-    compute_type: str = "float16"  # "float16", "int8", "float32"
+    compute_type: str = "int8"  # "int8", "float16", "float32"
 
 
 @dataclass(slots=True)

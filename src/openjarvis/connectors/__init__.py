@@ -54,6 +54,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.connectors.apple_calendar  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.connectors.apple_music  # noqa: F401
 except ImportError:
     pass
@@ -130,5 +135,25 @@ except ImportError:
 
 try:
     import openjarvis.connectors.news_rss  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.connectors.budget  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.connectors.instagram  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.connectors.facebook  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.connectors.linkedin  # noqa: F401
 except ImportError:
     pass

@@ -17,6 +17,7 @@ epoch of 2001-01-01 00:00:00 UTC.  Conversion formula::
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +26,8 @@ from typing import Dict, Iterator, List, Optional, Tuple
 from openjarvis.connectors._stubs import BaseConnector, Document, SyncStatus
 from openjarvis.core.registry import ConnectorRegistry
 from openjarvis.tools._stubs import ToolSpec
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -90,8 +93,29 @@ class IMessageConnector(BaseConnector):
     # ------------------------------------------------------------------
 
     def is_connected(self) -> bool:
-        """Return ``True`` if the chat.db file exists at the configured path."""
-        return self._db_path.exists()
+        """Return ``True`` if chat.db exists and is readable.
+
+        If the file exists but cannot be opened, this almost certainly means
+        Full Disk Access has not been granted.  The method logs a clear
+        diagnostic so the user knows what to fix.
+        """
+        if not self._db_path.exists():
+            return False
+        try:
+            conn = sqlite3.connect(
+                f"file:{self._db_path}?mode=ro", uri=True
+            )
+            conn.execute("SELECT 1 FROM message LIMIT 1")
+            conn.close()
+            return True
+        except sqlite3.OperationalError:
+            logger.warning(
+                "iMessage database exists at %s but cannot be read. "
+                "Grant Full Disk Access to this process in "
+                "System Settings → Privacy & Security → Full Disk Access.",
+                self._db_path,
+            )
+            return False
 
     def disconnect(self) -> None:
         """Mark the connector as disconnected."""
@@ -124,6 +148,13 @@ class IMessageConnector(BaseConnector):
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         except sqlite3.OperationalError:
+            logger.warning(
+                "Cannot open iMessage database at %s — "
+                "Full Disk Access is likely not granted. "
+                "Go to System Settings → Privacy & Security → Full Disk Access "
+                "and add this application.",
+                db_path,
+            )
             return
 
         try:

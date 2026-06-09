@@ -342,6 +342,7 @@ class SystemBuilder:
     def _resolve_memory(self, config):
         try:
             import openjarvis.tools.storage  # noqa: F401 -- trigger registration
+            import openjarvis.connectors.store  # noqa: F401 -- register "knowledge" backend
             from openjarvis.core.registry import MemoryRegistry
 
             key = config.memory.default_backend

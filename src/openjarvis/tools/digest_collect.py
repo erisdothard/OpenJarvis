@@ -33,9 +33,10 @@ _SECTION_ORDER: List[tuple] = [
             "github_notifications",
         },
     ),
-    ("CALENDAR", {"gcalendar"}),
+    ("CALENDAR", {"gcalendar", "apple_calendar"}),
     ("WORLD", {"weather", "hackernews", "news_rss"}),
     ("MUSIC", {"spotify", "apple_music"}),
+    ("SOCIAL", {"facebook", "instagram", "linkedin"}),
 ]
 
 _CONNECTOR_TO_SECTION: Dict[str, str] = {}
@@ -279,6 +280,26 @@ def _format_gcalendar(doc: Document) -> str:
     return f"[gcalendar id={doc.doc_id}] {time_str} — {title}{time_range}"
 
 
+def _format_apple_calendar(doc: Document) -> str:
+    """Format an Apple Calendar event document."""
+    title = doc.title or "(No title)"
+    start = doc.metadata.get("start", "")
+    end = doc.metadata.get("end", "")
+    location = doc.metadata.get("location", "")
+    calendar_name = doc.metadata.get("calendar", "")
+    parts = [f"[apple_calendar] {title}"]
+    if start:
+        time_range = start
+        if end:
+            time_range += f" – {end}"
+        parts.append(time_range)
+    if location:
+        parts.append(f"at {location}")
+    if calendar_name:
+        parts.append(f"({calendar_name})")
+    return " | ".join(parts)
+
+
 def _format_spotify(doc: Document) -> str:
     """Format a Spotify recently-played track — returns 'Track — Artist'."""
     # doc.title is already "Track — Artist" from the connector
@@ -333,6 +354,56 @@ def _format_news_rss(doc: Document) -> str:
     return line
 
 
+def _format_facebook(doc: Document) -> str:
+    """Format a Facebook post or page info document."""
+    ago = _time_ago(doc.timestamp)
+    if doc.doc_type == "page_info":
+        data = _parse_content_json(doc)
+        followers = data.get("followers_count", 0)
+        return f"[facebook] Page: {doc.title} ({followers} followers)"
+    # Post
+    likes = doc.metadata.get("like_count", 0)
+    comments = doc.metadata.get("comments_count", 0)
+    shares = doc.metadata.get("shares_count", 0)
+    snippet = doc.content[:120].replace("\n", " ").strip() if doc.content else ""
+    stats = f"{likes} likes, {comments} comments, {shares} shares"
+    line = f"[facebook] Post ({ago}): {stats}"
+    if snippet:
+        line += f"\n  {snippet}"
+    return line
+
+
+def _format_instagram(doc: Document) -> str:
+    """Format an Instagram post or comment document."""
+    ago = _time_ago(doc.timestamp)
+    if doc.doc_type == "comment":
+        author = doc.author or "Unknown"
+        text = doc.content[:100].replace("\n", " ").strip() if doc.content else ""
+        return f"[instagram] Comment by {author} ({ago}): {text}"
+    # Post
+    likes = doc.metadata.get("like_count", 0)
+    comments = doc.metadata.get("comments_count", 0)
+    media_type = doc.metadata.get("media_type", "").lower()
+    caption = doc.content[:120].replace("\n", " ").strip() if doc.content else ""
+    type_label = f" [{media_type}]" if media_type else ""
+    line = f"[instagram]{type_label} Post ({ago}): {likes} likes, {comments} comments"
+    if caption:
+        line += f"\n  {caption}"
+    return line
+
+
+def _format_linkedin(doc: Document) -> str:
+    """Format a LinkedIn profile or post document."""
+    if doc.doc_type == "profile":
+        data = _parse_content_json(doc)
+        name = data.get("name", doc.title or "LinkedIn Profile")
+        email = data.get("email", "")
+        email_str = f" ({email})" if email else ""
+        return f"[linkedin] Profile: {name}{email_str}"
+    # Post or other doc type
+    return f"[linkedin] {doc.title}"
+
+
 # Map connector IDs to their formatting functions
 _FORMATTERS: Dict[str, Any] = {
     "oura": _format_oura,
@@ -347,12 +418,16 @@ _FORMATTERS: Dict[str, Any] = {
     "outlook": _format_outlook,
     "notion": _format_notion,
     "gcalendar": _format_gcalendar,
+    "apple_calendar": _format_apple_calendar,
     "weather": _format_weather,
     "github_notifications": _format_github_notifications,
     "hackernews": _format_hackernews,
     "news_rss": _format_news_rss,
     "spotify": _format_spotify,
     "apple_music": _format_apple_music,
+    "facebook": _format_facebook,
+    "instagram": _format_instagram,
+    "linkedin": _format_linkedin,
 }
 
 
@@ -432,8 +507,8 @@ class DigestCollectTool(BaseTool):
             name="digest_collect",
             description=(
                 "Fetch recent data from configured connectors (email, calendar, "
-                "health, tasks, etc.) and return a structured, human-readable "
-                "summary grouped by section (Health, Messages, Calendar, Music) "
+                "health, tasks, social, etc.) and return a structured, human-readable "
+                "summary grouped by section (Health, Messages, Calendar, Music, Social) "
                 "for digest synthesis."
             ),
             parameters={

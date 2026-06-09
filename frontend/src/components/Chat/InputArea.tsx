@@ -3,7 +3,7 @@ import { Send, Square, Paperclip, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore, generateId } from '../../lib/store';
 import { streamChat, streamResearch } from '../../lib/sse';
-import { fetchSavings, getBase } from '../../lib/api';
+import { fetchSavings, getBase, synthesizeSpeech } from '../../lib/api';
 import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { MicButton } from './MicButton';
 import { useSpeech } from '../../hooks/useSpeech';
@@ -97,7 +97,99 @@ export function InputArea() {
   const setDeepResearch = useAppStore((s) => s.setDeepResearch);
   const corpusSync = useResearchCorpusSync(deepResearch);
 
-  const { state: speechState, available: speechAvailable, startRecording, stopRecording } = useSpeech();
+  const pendingVoiceRef = useRef(false);
+  const voiceInitiatedRef = useRef(false);
+
+  // Audio queue for sentence-level TTS playback
+  const audioQueueRef = useRef<HTMLAudioElement[]>([]);
+  const playingRef = useRef(false);
+  const sentenceBufferRef = useRef('');
+
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const startRecordingRef = useRef<(() => Promise<void>) | undefined>(undefined);
+  const interruptAudioRef = useRef<() => void>(() => {});
+  const stopBargeInRef = useRef<() => void>(() => {});
+  const startBargeInRef = useRef<(cb: () => void) => void>(() => {});
+
+  const playNextAudio = useCallback(() => {
+    if (audioQueueRef.current.length === 0) {
+      playingRef.current = false;
+      currentAudioRef.current = null;
+      stopBargeInRef.current();
+      // Auto-listen: start recording after Jarvis finishes speaking
+      if (voiceInitiatedRef.current && speechEnabled) {
+        voiceInitiatedRef.current = false;
+        startRecordingRef.current?.().catch(() => {});
+      }
+      return;
+    }
+    playingRef.current = true;
+    const audio = audioQueueRef.current.shift()!;
+    currentAudioRef.current = audio;
+    audio.onended = () => {
+      URL.revokeObjectURL(audio.src);
+      currentAudioRef.current = null;
+      playNextAudio();
+    };
+    audio.play().catch(() => playNextAudio());
+    // Start barge-in monitor so user can interrupt by speaking
+    startBargeInRef.current(() => {
+      interruptAudioRef.current();
+      voiceInitiatedRef.current = true;
+      startRecordingRef.current?.().catch(() => {});
+    });
+  }, [speechEnabled]);
+
+  // Interrupt Jarvis: stop all queued audio immediately
+  const interruptAudio = useCallback(() => {
+    stopBargeInRef.current();
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      URL.revokeObjectURL(currentAudioRef.current.src);
+      currentAudioRef.current = null;
+    }
+    for (const a of audioQueueRef.current) {
+      URL.revokeObjectURL(a.src);
+    }
+    audioQueueRef.current = [];
+    playingRef.current = false;
+  }, []);
+  interruptAudioRef.current = interruptAudio;
+
+  const queueSentenceTTS = useCallback((sentence: string) => {
+    const clean = sentence
+      .replace(/```[\s\S]*?```/g, 'code block omitted')
+      .replace(/[#*_~`>\[\]]/g, '')
+      .replace(/\n+/g, ' ')
+      .trim();
+    if (!clean) return;
+    synthesizeSpeech(clean)
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audioQueueRef.current.push(audio);
+        if (!playingRef.current) playNextAudio();
+      })
+      .catch(() => {});
+  }, [playNextAudio]);
+
+  const handleVoiceTranscribed = useCallback((text: string) => {
+    if (text) {
+      setInput(text);
+      pendingVoiceRef.current = true;
+    }
+  }, []);
+
+  const { state: speechState, error: speechError, available: speechAvailable, startRecording, stopRecording, startBargeInMonitor, stopBargeInMonitor } = useSpeech({
+    onTranscribed: handleVoiceTranscribed,
+  });
+  startRecordingRef.current = startRecording;
+  stopBargeInRef.current = stopBargeInMonitor;
+  startBargeInRef.current = startBargeInMonitor;
+
+  useEffect(() => {
+    if (speechError) toast.error(speechError);
+  }, [speechError]);
 
   // Abort in-flight stream when the user switches models mid-generation.
   // This prevents errors from trying to continue a stream with a stale model.
@@ -123,19 +215,24 @@ export function InputArea() {
     : undefined;
 
   const handleMicClick = useCallback(async () => {
+    // Interrupt Jarvis if she's speaking
+    interruptAudio();
+
     if (speechState === 'recording') {
       try {
         const text = await stopRecording();
         if (text) {
-          setInput((prev) => (prev ? prev + ' ' + text : text));
+          setInput(text);
+          pendingVoiceRef.current = true;
         }
       } catch {
         // Error is captured in useSpeech
       }
     } else {
+      voiceInitiatedRef.current = true;
       await startRecording();
     }
-  }, [speechState, startRecording, stopRecording]);
+  }, [speechState, startRecording, stopRecording, interruptAudio]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -162,6 +259,8 @@ export function InputArea() {
     }
 
     setInput('');
+    sentenceBufferRef.current = '';
+    audioQueueRef.current = [];
 
     let convId = activeId;
     if (!convId) {
@@ -413,6 +512,17 @@ export function InputArea() {
               accumulatedContent += delta.content;
               setStreamState({ content: accumulatedContent, phase: '' });
 
+              // Sentence-level TTS: queue audio as sentences complete
+              if (speechEnabled) {
+                sentenceBufferRef.current += delta.content;
+                const sentenceMatch = sentenceBufferRef.current.match(/^([\s\S]*?[.!?])\s+([\s\S]*)$/);
+                if (sentenceMatch) {
+                  const completeSentence = sentenceMatch[1].trim();
+                  sentenceBufferRef.current = sentenceMatch[2];
+                  if (completeSentence) queueSentenceTTS(completeSentence);
+                }
+              }
+
               const now = Date.now();
               if (now - lastFlush >= 80) {
                 updateLastAssistant(
@@ -498,6 +608,13 @@ export function InputArea() {
       });
       abortRef.current = null;
 
+      // Flush remaining sentence buffer for TTS
+      if (speechEnabled && sentenceBufferRef.current.trim()) {
+        queueSentenceTTS(sentenceBufferRef.current);
+        sentenceBufferRef.current = '';
+      }
+      voiceInitiatedRef.current = false;
+
       // Research path updates session counters optimistically from the
       // `done` event's usage payload — re-fetching here would overwrite
       // it with a potentially stale snapshot if the server's research
@@ -521,7 +638,18 @@ export function InputArea() {
     deepResearch,
     temperature,
     maxTokens,
+    speechEnabled,
+    queueSentenceTTS,
   ]);
+
+  // Auto-send after voice transcription fills the input
+  useEffect(() => {
+    if (pendingVoiceRef.current && input.trim()) {
+      pendingVoiceRef.current = false;
+      voiceInitiatedRef.current = true;
+      sendMessage();
+    }
+  }, [input, sendMessage]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -532,6 +660,7 @@ export function InputArea() {
 
   return (
     <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
+      {/* Deep Research toggle */}
       <div className="mb-2 flex flex-col gap-1">
         <div className="flex items-center gap-2">
           <button
@@ -539,12 +668,12 @@ export function InputArea() {
             onClick={() => setDeepResearch(!deepResearch)}
             disabled={streamState.isStreaming}
             aria-pressed={deepResearch}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition-colors cursor-pointer disabled:cursor-default disabled:opacity-50"
-            style={{
-              background: deepResearch ? 'var(--color-accent-subtle)' : 'transparent',
-              border: `1px solid ${deepResearch ? 'var(--color-accent)' : 'var(--color-border)'}`,
-              color: deepResearch ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
-            }}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] transition-colors cursor-pointer disabled:cursor-default disabled:opacity-50 rounded-full ${deepResearch ? 'hud-tag' : ''}`}
+            style={!deepResearch ? {
+              background: 'transparent',
+              border: '1px solid var(--color-border)',
+              color: 'var(--color-text-tertiary)',
+            } : {}}
             title={deepResearch ? 'Deep Research: on' : 'Deep Research: off'}
           >
             <Search size={12} />
@@ -552,24 +681,22 @@ export function InputArea() {
           </button>
         </div>
         {deepResearch && corpusSync.syncing && corpusSync.itemsSynced > 0 && (
-          <div
-            className="text-[11px] leading-snug"
-            style={{ color: 'var(--color-text-tertiary)' }}
-          >
-            Searching over{' '}
-            <span key={corpusSync.itemsSynced} className="sync-bump" style={{ color: 'var(--color-text-secondary)' }}>
+          <div className="text-[12px] leading-snug" style={{ color: 'var(--color-text-tertiary)' }}>
+            Indexing{' '}
+            <span key={corpusSync.itemsSynced} className="sync-bump" style={{ color: 'var(--color-accent)' }}>
               {corpusSync.itemsSynced.toLocaleString()}
             </span>{' '}
-            items — sync in progress, results will improve as more data is indexed.
+            items — sync in progress
           </div>
         )}
       </div>
+
+      {/* Input bar */}
       <div
-        className="flex items-center gap-2 rounded-2xl px-4 py-3 transition-shadow"
+        className="chroma-border flex items-center gap-2 px-4 py-3 transition-shadow rounded-2xl"
         style={{
-          background: 'var(--color-input-bg)',
-          border: '1px solid var(--color-input-border)',
-          boxShadow: 'var(--shadow-sm)',
+          background: 'rgba(255, 255, 255, 0.015)',
+          border: '1px solid rgba(255, 255, 255, 0.04)',
         }}
       >
         <textarea
@@ -577,23 +704,29 @@ export function InputArea() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={selectedModel ? 'Message OpenJarvis...' : 'Pick a model first (⌘K)...'}
+          placeholder={selectedModel ? 'Message Jarvis...' : 'Select a model first (⌘K)...'}
           rows={1}
-          className="flex-1 bg-transparent outline-none resize-none text-sm leading-relaxed"
-          style={{ color: 'var(--color-text)', maxHeight: '200px' }}
+          className="flex-1 bg-transparent outline-none resize-none text-[15px] leading-relaxed"
+          style={{
+            color: 'var(--color-text-bright)',
+            maxHeight: '200px',
+          }}
           disabled={streamState.isStreaming || modelLoading}
         />
         {streamState.isStreaming ? (
           <button
             onClick={stopStreaming}
-            className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer"
-            style={{ background: 'var(--color-error)', color: 'var(--color-on-accent)' }}
+            className="p-2.5 transition-colors shrink-0 cursor-pointer rounded-xl"
+            style={{
+              background: 'var(--color-error)',
+              color: '#fff',
+            }}
             title="Stop generating"
           >
-            <Square size={16} />
+            <Square size={14} />
           </button>
         ) : (
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5">
             <MicButton
               state={speechState}
               onClick={handleMicClick}
@@ -603,22 +736,20 @@ export function InputArea() {
             <button
               onClick={sendMessage}
               disabled={!input.trim() || modelLoading || !selectedModel}
-              title={selectedModel ? 'Send message' : 'Pick a model first (⌘K)'}
-              className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
-              style={{
-                background: input.trim() ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
-                color: input.trim() ? 'white' : 'var(--color-text-tertiary)',
-              }}
+              title={selectedModel ? 'Send' : 'Select a model first (⌘K)'}
+              className="chroma-button-primary p-2.5 shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default rounded-xl"
             >
-              <Send size={16} />
+              <Send size={14} />
             </button>
           </div>
         )}
       </div>
+
+      {/* Hint */}
       <div className="flex items-center justify-center mt-2 text-[11px]" style={{ color: 'var(--color-text-tertiary)' }}>
         <span>
-          <kbd className="font-mono">Enter</kbd> to send &middot;{' '}
-          <kbd className="font-mono">Shift+Enter</kbd> for new line
+          <kbd className="font-mono text-[10px]">Enter</kbd> to send &middot;{' '}
+          <kbd className="font-mono text-[10px]">Shift+Enter</kbd> new line
         </span>
       </div>
     </div>

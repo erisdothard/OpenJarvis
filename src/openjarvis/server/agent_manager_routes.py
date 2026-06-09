@@ -80,6 +80,7 @@ def _resolve_memory_backend(config: Any) -> Any:
         return None
     try:
         import openjarvis.tools.storage  # noqa: F401
+        import openjarvis.connectors.store  # noqa: F401  # register "knowledge" backend
         from openjarvis.core.registry import MemoryRegistry
 
         key = config.memory.default_backend
@@ -111,24 +112,34 @@ def _make_lightweight_system(
     model: str,
     config: Any = None,
 ) -> _LightweightSystem:
-    """Build a minimal system with a plain OllamaEngine.
+    """Build a minimal system with the right engine for the model.
 
-    The server's ``app.state.engine`` is heavily wrapped
-    (MultiEngine -> InstrumentedEngine -> GuardrailsEngine) and can
-    return empty content from background threads.  Create a fresh
-    OllamaEngine directly (no health checks or model discovery that
-    could interfere with in-flight Ollama requests).
+    Cloud models (gemini-*, gpt-*, claude-*, etc.) get a CloudEngine;
+    local models get a plain OllamaEngine.  The server's
+    ``app.state.engine`` is heavily wrapped (MultiEngine ->
+    InstrumentedEngine -> GuardrailsEngine) and can return empty
+    content from background threads, so we create a fresh engine
+    directly.
     """
     try:
-        from openjarvis.engine.ollama import OllamaEngine
+        from openjarvis.server.cloud_router import is_cloud_model
 
         cfg = config
         if cfg is None:
             from openjarvis.core.config import load_config
 
             cfg = load_config()
-        host = cfg.engine.ollama.host if cfg else ""
-        plain_engine = OllamaEngine(host=host) if host else OllamaEngine()
+
+        if is_cloud_model(model):
+            from openjarvis.engine.cloud import CloudEngine
+
+            plain_engine = CloudEngine()
+        else:
+            from openjarvis.engine.ollama import OllamaEngine
+
+            host = cfg.engine.ollama.host if cfg else ""
+            plain_engine = OllamaEngine(host=host) if host else OllamaEngine()
+
         # Wrap with InstrumentedEngine so agent ticks are recorded
         # in telemetry (FLOPs, energy, cost savings).
         try:

@@ -1,0 +1,263 @@
+/*
+ * OpenJarvis — Chromatic Liquid Metal Effects
+ * Iridescent spectral edges. Mirror reflections. Dispersion glow.
+ */
+
+/* ── Chromatic Keyframes ── */
+@keyframes chroma-border-travel {
+  0%   { background-position: 0% center; }
+  100% { background-position: 200% center; }
+}
+
+@keyframes chroma-glow-pulse {
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 0.8; }
+}
+
+@keyframes chroma-shimmer {
+  0%   { left: -100%; }
+  100% { left: 200%; }
+}
+
+/* ── Chromatic Border Mixin (via class) ── */
+.chroma-edge {
+  position: relative;
+}
+.chroma-edge::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 0, 128, 0.0) 0%,
+    rgba(255, 0, 128, 0.15) 10%,
+    rgba(255, 109, 0, 0.2) 20%,
+    rgba(255, 234, 0, 0.2) 35%,
+    rgba(0, 255, 135, 0.2) 50%,
+    rgba(0, 229, 255, 0.25) 65%,
+    rgba(140, 0, 255, 0.15) 80%,
+    rgba(255, 0, 128, 0.0) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: chroma-border-travel 4s linear infinite;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 400ms ease;
+}
+.chroma-edge:hover::before {
+  opacity: 1;
+}
+
+/* ── Persistent (always-visible) chromatic edge ── */
+.chroma-edge-always::before {
+  opacity: 0.5;
+}
+.chroma-edge-always:hover::before {
+  opacity: 1;
+}
+
+/* ── Text — clean ── */
+.ca-text, .ca-heading { text-shadow: none; }
+.ca-text-hover { transition: color 200ms ease; }
+.ca-text-hover:hover { color: var(--color-text-bright); }
+.ca-border, .ca-box { box-shadow: none; }
+.ca-border-hover { transition: box-shadow 200ms ease; }
+.ca-border-hover:hover { box-shadow: var(--shadow-sm); }
+.ca-pulse { animation: none; }
+[data-ca-filter] { filter: none; }
+
+/* ── User chat bubble ── */
+.chroma-bubble {
+  background: var(--color-user-bubble);
+  border: 1px solid rgba(0, 229, 255, 0.08);
+  color: var(--color-user-bubble-text);
+  border-radius: var(--radius-bubble-user);
+  position: relative;
+}
+.chroma-bubble::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    135deg,
+    rgba(0, 229, 255, 0.12) 0%,
+    rgba(140, 0, 255, 0.08) 50%,
+    rgba(255, 0, 128, 0.06) 100%
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* ── Send button — chromatic gradient ── */
+.chroma-button-primary {
+  background: linear-gradient(135deg, #00e5ff, #00ff87, #00e5ff) !important;
+  background-size: 200% 200% !important;
+  color: #000000 !important;
+  font-weight: 600;
+  border: none !important;
+  border-radius: var(--radius-sm) !important;
+  transition: all 200ms ease;
+}
+.chroma-button-primary:hover {
+  background-position: 100% 100% !important;
+  transform: scale(1.04);
+  box-shadow: 0 0 20px -4px rgba(0, 229, 255, 0.3),
+              0 0 40px -8px rgba(0, 255, 135, 0.15);
+}
+.chroma-button-primary:active { transform: scale(0.97); }
+
+/* ── Sidebar ── */
+.sidebar-icon-btn {
+  color: var(--color-text-secondary);
+  background: transparent;
+  border-radius: var(--radius-sm);
+  transition: background 150ms ease, color 150ms ease;
+}
+.sidebar-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--color-text-bright);
+}
+
+.sidebar-nav-item {
+  border-radius: var(--radius-sm);
+  transition: background 150ms ease, color 150ms ease;
+}
+.sidebar-nav-item:not(.is-active):hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.sidebar-nav-item.is-active {
+  background: rgba(0, 229, 255, 0.06);
+  color: var(--color-accent);
+  font-weight: 500;
+}
+
+.chroma-active-bar {
+  position: absolute; left: 0; top: 15%; bottom: 15%;
+  width: 2px; border-radius: 0 999px 999px 0;
+  background: linear-gradient(
+    180deg,
+    var(--chroma-cyan),
+    var(--chroma-green),
+    var(--chroma-cyan)
+  );
+}
+
+.model-badge {
+  position: relative;
+  border-radius: var(--radius-md);
+  transition: background 150ms ease, border-color 150ms ease;
+}
+.model-badge:hover {
+  background: rgba(255, 255, 255, 0.03) !important;
+  border-color: rgba(0, 229, 255, 0.1) !important;
+}
+
+/* ── Code block header ── */
+.code-block-header {
+  position: relative;
+  background: var(--color-bg-tertiary);
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* ── Input focus ring — chromatic ── */
+.chroma-border { position: relative; }
+.chroma-border:focus-within {
+  box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.12),
+              0 0 20px -8px rgba(0, 229, 255, 0.08);
+  border-color: rgba(0, 229, 255, 0.15) !important;
+}
+
+/* ── Ambient BG — very subtle radial glows ── */
+.chroma-bg {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background:
+    radial-gradient(ellipse 60% 40% at 15% 10%, rgba(0, 229, 255, 0.015) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 50% at 85% 90%, rgba(140, 0, 255, 0.01) 0%, transparent 60%),
+    radial-gradient(ellipse 40% 30% at 50% 50%, rgba(255, 0, 128, 0.005) 0%, transparent 60%);
+}
+
+.chroma-text { color: var(--color-accent); }
+.chroma-glow { transition: box-shadow 200ms ease; }
+.chroma-glow:hover { box-shadow: var(--shadow-chroma); }
+
+/* ── Prose headings — clean ── */
+.prose h1, .prose h2, .prose h3 { text-shadow: none; }
+
+/* ── Chromatic card hover effect ── */
+.chroma-card {
+  position: relative;
+  background: rgba(255, 255, 255, 0.01);
+  border: 1px solid rgba(255, 255, 255, 0.03);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  transition: border-color 400ms ease, background 400ms ease;
+}
+/* Chromatic edge shimmer on hover */
+.chroma-card::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    135deg,
+    rgba(0, 229, 255, 0.2) 0%,
+    rgba(0, 255, 135, 0.15) 25%,
+    rgba(255, 234, 0, 0.1) 50%,
+    rgba(255, 0, 128, 0.15) 75%,
+    rgba(140, 0, 255, 0.2) 100%
+  );
+  background-size: 200% 200%;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: chroma-border-travel 4s linear infinite;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 400ms ease;
+}
+.chroma-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  background: linear-gradient(
+    135deg,
+    rgba(0, 229, 255, 0.015) 0%,
+    transparent 50%,
+    rgba(140, 0, 255, 0.01) 100%
+  );
+  transition: opacity 400ms ease;
+  pointer-events: none;
+}
+.chroma-card:hover {
+  background: rgba(255, 255, 255, 0.015);
+  border-color: transparent;
+}
+.chroma-card:hover::before {
+  opacity: 1;
+}
+.chroma-card:hover::after {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chroma-button-primary { transition: none; }
+  .chroma-active-bar { animation: none; }
+  .chroma-edge::before { animation: none; }
+}

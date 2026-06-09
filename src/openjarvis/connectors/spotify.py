@@ -6,6 +6,8 @@ Uses OAuth2 tokens stored locally. Requires user-read-recently-played scope.
 from __future__ import annotations
 
 import json
+import logging
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
@@ -16,9 +18,29 @@ from openjarvis.connectors._stubs import BaseConnector, Document, SyncStatus
 from openjarvis.core.config import DEFAULT_CONFIG_DIR
 from openjarvis.core.registry import ConnectorRegistry
 
+_log = logging.getLogger(__name__)
+
 _SPOTIFY_API_BASE = "https://api.spotify.com/v1"
 _SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 _DEFAULT_TOKEN_PATH = str(DEFAULT_CONFIG_DIR / "connectors" / "spotify.json")
+
+
+def _spotify_refresh_token(
+    refresh_token: str, client_id: str, client_secret: str
+) -> Dict[str, Any]:
+    """Exchange a refresh token for a new access token."""
+    resp = httpx.post(
+        _SPOTIFY_TOKEN_URL,
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _spotify_api_get(
@@ -50,8 +72,50 @@ class SpotifyConnector(BaseConnector):
     def _load_tokens(self) -> Dict[str, str]:
         return json.loads(self._token_path.read_text(encoding="utf-8"))
 
+    def _save_tokens(self, tokens: Dict[str, str]) -> None:
+        self._token_path.write_text(json.dumps(tokens, indent=2), encoding="utf-8")
+
+    def _get_client_credentials(self) -> tuple[str, str]:
+        client_id = os.environ.get("OPENJARVIS_SPOTIFY_CLIENT_ID", "")
+        client_secret = os.environ.get("OPENJARVIS_SPOTIFY_CLIENT_SECRET", "")
+        if client_id and client_secret:
+            return client_id, client_secret
+        tokens = self._load_tokens()
+        return tokens.get("client_id", ""), tokens.get("client_secret", "")
+
     def _get_access_token(self) -> str:
-        return self._load_tokens()["access_token"]
+        """Return current access token, auto-refreshing if expired."""
+        token = self._load_tokens().get("access_token", "")
+        # Quick check: try a lightweight call
+        try:
+            httpx.get(
+                f"{_SPOTIFY_API_BASE}/me",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10.0,
+            ).raise_for_status()
+            return token
+        except httpx.HTTPStatusError:
+            pass
+        # Token expired — refresh it
+        tokens = self._load_tokens()
+        refresh = tokens.get("refresh_token", "")
+        if not refresh:
+            return token  # no refresh token, return stale token
+        client_id, client_secret = self._get_client_credentials()
+        if not client_id or not client_secret:
+            _log.warning("Spotify client credentials missing — cannot refresh token")
+            return token
+        try:
+            new = _spotify_refresh_token(refresh, client_id, client_secret)
+            tokens["access_token"] = new["access_token"]
+            if "refresh_token" in new:
+                tokens["refresh_token"] = new["refresh_token"]
+            self._save_tokens(tokens)
+            _log.info("Spotify access token refreshed")
+            return tokens["access_token"]
+        except httpx.HTTPStatusError as exc:
+            _log.warning("Spotify token refresh failed: %s", exc)
+            return token
 
     def is_connected(self) -> bool:
         return self._token_path.exists()
@@ -105,8 +169,6 @@ class SpotifyConnector(BaseConnector):
         payload = {
             "access_token": tokens.get("access_token", ""),
             "refresh_token": tokens.get("refresh_token", ""),
-            "client_id": client_id,
-            "client_secret": client_secret,
         }
         for filename in provider.credential_files:
             save_tokens(str(_CONNECTORS_DIR / filename), payload)

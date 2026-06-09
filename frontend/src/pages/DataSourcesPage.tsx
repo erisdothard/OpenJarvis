@@ -1953,16 +1953,33 @@ export function DataSourcesPage() {
   const [agents, setAgents] = useState<ManagedAgent[]>([]);
   const [activeTab, setActiveTab] = useState<'sources' | 'messaging' | 'memory'>('sources');
   const [creatingAgent, setCreatingAgent] = useState(false);
+  // Track which agent has channel bindings so we don't lose them when
+  // another agent gets updated more recently and becomes agents[0].
+  const [messagingAgentId, setMessagingAgentId] = useState<string | null>(null);
 
   const loadAgents = useCallback(() => {
-    fetchManagedAgents().then(setAgents).catch(() => {});
-  }, []);
+    fetchManagedAgents().then(async (fetched) => {
+      setAgents(fetched);
+      // Find the agent that already has channel bindings so we don't pick a
+      // different agent[0] every time and lose the user's saved config.
+      if (!messagingAgentId && fetched.length > 0) {
+        for (const agent of fetched) {
+          try {
+            const bindings = await fetchAgentChannels(agent.id);
+            if (bindings.length > 0) {
+              setMessagingAgentId(agent.id);
+              return;
+            }
+          } catch { /* ignore */ }
+        }
+      }
+    }).catch(() => {});
+  }, [messagingAgentId]);
 
   useEffect(() => { loadAgents(); }, [loadAgents]);
 
-  // Pick the first agent for messaging channel bindings.
-  // If none exists and user opens Messaging tab, auto-create a default one.
-  const firstAgent = agents[0];
+  // Pick the agent with existing channel bindings, otherwise the first agent.
+  const firstAgent = agents.find((a) => a.id === messagingAgentId) || agents[0];
 
   const ensureAgent = useCallback(async (): Promise<string | null> => {
     if (firstAgent) return firstAgent.id;
@@ -1973,6 +1990,7 @@ export function DataSourcesPage() {
         template_id: "personal_deep_research",
       });
       setAgents((prev) => [...prev, agent]);
+      setMessagingAgentId(agent.id);
       return agent.id;
     } catch {
       return null;

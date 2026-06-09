@@ -11,6 +11,7 @@ from openjarvis.agents.errors import (
     AgentTickError,
     EscalateError,
     FatalError,
+    QuotaExhaustedError,
     classify_error,
     retry_delay,
 )
@@ -23,14 +24,12 @@ logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
 
-# Default model for monitor_operative / long-horizon agent ticks. qwen3:8b
-# emits tool_calls but, when given the full MonitorOperative system prompt
-# alongside a `think` no-op tool, reliably picks `think` instead of the real
-# action tools — producing tickless prose from training-data memory.
-# gemma4:31b follows the function-calling protocol with the same prompt and
+# Default model for monitor_operative / long-horizon agent ticks.
+# Groq is free-tier with generous rate limits (vs Gemini's 20 req/day).
+# llama-3.3-70b-versatile follows function-calling protocol reliably and
 # actually invokes web_search / memory_retrieve. Explicit ``config["model"]``
-# on an agent still wins.
-_AGENT_TICK_DEFAULT_MODEL = "gemma4:31b"
+# on an agent still wins. Fallback chain in config.toml provides Gemini/local.
+_AGENT_TICK_DEFAULT_MODEL = "groq/llama-3.3-70b-versatile"
 
 
 class AgentExecutor:
@@ -212,44 +211,143 @@ class AgentExecutor:
                     trace_steps,
                 )
 
+    def _build_fallback_chain(self, agent: dict) -> list[str]:
+        """Build the ordered model fallback chain for this agent."""
+        config = agent.get("config", {})
+
+        # Agent-level override > global config
+        chain_str = config.get("model_fallback_chain", "")
+        if not chain_str and self._system:
+            sys_cfg = getattr(self._system, "config", None)
+            if sys_cfg:
+                chain_str = getattr(sys_cfg.intelligence, "model_fallback_chain", "")
+
+        primary_model = (
+            config.get("model")
+            or _AGENT_TICK_DEFAULT_MODEL
+            or (self._system.model if self._system else "")
+        )
+
+        if chain_str:
+            chain = [m.strip() for m in chain_str.split(",") if m.strip()]
+            # Ensure primary model is first if not already in the chain
+            if primary_model and primary_model not in chain:
+                chain.insert(0, primary_model)
+        else:
+            chain = [primary_model] if primary_model else []
+
+        return chain or ["gemini-2.5-flash"]
+
     def _run_with_retries(self, agent: dict) -> AgentResult:
-        """Invoke the agent, retrying on RetryableError up to _MAX_RETRIES."""
+        """Invoke the agent with model fallback on quota exhaustion.
+
+        For transient errors (503, short rate limits): retry the same model.
+        For quota exhaustion (429 daily limit): advance to the next model.
+        Only error out when the entire fallback chain is exhausted.
+        """
+        chain = self._build_fallback_chain(agent)
+        config = agent.get("config", {})
+        original_model = config.get("model")
         last_error: AgentTickError | None = None
 
-        for attempt in range(_MAX_RETRIES):
-            try:
-                return self._invoke_agent(agent)
-            except AgentTickError as e:
-                if not e.retryable or attempt == _MAX_RETRIES - 1:
-                    raise
-                last_error = e
-                delay = retry_delay(attempt)
-                logger.info(
-                    "Agent %s tick retry %d/%d in %ds: %s",
-                    agent["id"],
-                    attempt + 1,
-                    _MAX_RETRIES,
-                    delay,
-                    e,
-                )
-                time.sleep(delay)
-            except Exception as e:
-                classified = classify_error(e)
-                if not classified.retryable or attempt == _MAX_RETRIES - 1:
-                    raise classified from e
-                delay = retry_delay(attempt)
-                logger.info(
-                    "Agent %s tick retry %d/%d in %ds: %s",
-                    agent["id"],
-                    attempt + 1,
-                    _MAX_RETRIES,
-                    delay,
-                    e,
-                )
-                time.sleep(delay)
+        for model_idx, model in enumerate(chain):
+            # Swap model for this attempt (engine-swap in _invoke_agent
+            # handles cloud<->local automatically)
+            config["model"] = model
 
-        # Should not reach here, but just in case
-        raise last_error or FatalError("max retries exhausted")
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    result = self._invoke_agent(agent)
+                    # Restore original model so persistent config isn't mutated
+                    if original_model is not None:
+                        config["model"] = original_model
+                    return result
+
+                except (QuotaExhaustedError, AgentTickError) as e:
+                    last_error = e if isinstance(e, AgentTickError) else classify_error(e)
+
+                    # Quota exhaustion → skip remaining retries, try next model
+                    if isinstance(e, QuotaExhaustedError) or isinstance(
+                        last_error, QuotaExhaustedError
+                    ):
+                        if model_idx < len(chain) - 1:
+                            next_model = chain[model_idx + 1]
+                            logger.warning(
+                                "Agent %s: %s quota exhausted, falling back to %s",
+                                agent["id"],
+                                model,
+                                next_model,
+                            )
+                            self._set_activity(
+                                agent["id"],
+                                f"Quota hit on {model}, trying {next_model}...",
+                            )
+                            break  # advance to next model
+                        raise  # no more fallbacks
+
+                    # Non-retryable, non-quota error → raise immediately
+                    if not e.retryable or attempt == _MAX_RETRIES - 1:
+                        raise
+
+                    delay = retry_delay(attempt)
+                    logger.info(
+                        "Agent %s tick retry %d/%d in %ds: %s",
+                        agent["id"],
+                        attempt + 1,
+                        _MAX_RETRIES,
+                        delay,
+                        e,
+                    )
+                    time.sleep(delay)
+
+                except Exception as e:
+                    classified = classify_error(e)
+                    last_error = classified
+
+                    # Quota exhaustion → advance to next model
+                    if isinstance(classified, QuotaExhaustedError):
+                        if model_idx < len(chain) - 1:
+                            next_model = chain[model_idx + 1]
+                            logger.warning(
+                                "Agent %s: %s quota exhausted, falling back to %s",
+                                agent["id"],
+                                model,
+                                next_model,
+                            )
+                            self._set_activity(
+                                agent["id"],
+                                f"Quota hit on {model}, trying {next_model}...",
+                            )
+                            break
+                        raise classified from e
+
+                    if not classified.retryable or attempt == _MAX_RETRIES - 1:
+                        raise classified from e
+
+                    delay = retry_delay(attempt)
+                    logger.info(
+                        "Agent %s tick retry %d/%d in %ds: %s",
+                        agent["id"],
+                        attempt + 1,
+                        _MAX_RETRIES,
+                        delay,
+                        e,
+                    )
+                    time.sleep(delay)
+            else:
+                # All retries exhausted on this model without quota error.
+                # This means we raised in the inner loop — we only get here
+                # via normal for-loop completion (no break). Should not happen
+                # because non-retryable errors raise, but guard anyway.
+                continue
+            # Broke out of inner loop (quota exhausted) — continue to next model
+            continue
+
+        # Restore original model
+        if original_model is not None:
+            config["model"] = original_model
+
+        raise last_error or FatalError("all models in fallback chain exhausted")
 
     def _invoke_agent(self, agent: dict) -> AgentResult:
         """Invoke the actual agent run. Tests mock this method."""
@@ -273,6 +371,45 @@ class AgentExecutor:
         )
         if not model:
             raise FatalError("No model configured for agent")
+
+        # Ensure the engine matches the model: cloud models need
+        # CloudEngine, local models need OllamaEngine.
+        try:
+            from openjarvis.server.cloud_router import is_cloud_model
+
+            def _unwrap(e: Any) -> Any:
+                return getattr(e, "_inner", e)
+
+            model_is_cloud = is_cloud_model(model)
+            engine_is_cloud = getattr(_unwrap(engine), "is_cloud", False)
+
+            if model_is_cloud and not engine_is_cloud:
+                from openjarvis.engine.cloud import CloudEngine
+                new_engine = CloudEngine()
+            elif not model_is_cloud and engine_is_cloud:
+                from openjarvis.engine.ollama import OllamaEngine
+                cfg = getattr(self._system, "config", None)
+                host = cfg.engine.ollama.host if cfg else ""
+                new_engine = OllamaEngine(host=host) if host else OllamaEngine()
+            else:
+                new_engine = None
+
+            if new_engine is not None:
+                try:
+                    from openjarvis.telemetry.instrumented_engine import (
+                        InstrumentedEngine,
+                    )
+                    if isinstance(engine, InstrumentedEngine):
+                        engine = InstrumentedEngine(
+                            new_engine, engine._bus,
+                            energy_monitor=getattr(engine, "_energy_monitor", None),
+                        )
+                    else:
+                        engine = new_engine
+                except Exception:
+                    engine = new_engine
+        except ImportError:
+            pass
 
         logger.info(
             "Agent %s [%s]: using model=%s, engine=%s",
@@ -484,7 +621,17 @@ class AgentExecutor:
             input_text = f"Current date: {today}\n\n{base}"
         pending = self._manager.get_pending_messages(agent["id"])
         if pending:
-            user_msgs = "\n".join(f"User: {m['content']}" for m in pending)
+            if len(pending) == 1:
+                user_msgs = f"User: {pending[0]['content']}"
+            else:
+                user_msgs = "\n".join(
+                    f"Message {i + 1}: {m['content']}"
+                    for i, m in enumerate(pending)
+                )
+                user_msgs = (
+                    f"The user sent {len(pending)} messages. "
+                    "Address each one individually in order:\n" + user_msgs
+                )
             input_text = f"{input_text}\n\nNew instructions:\n{user_msgs}"
             for m in pending:
                 self._manager.mark_message_delivered(m["id"])
@@ -694,8 +841,10 @@ class AgentExecutor:
                 EventType.AGENT_TICK_END,
                 {
                     "agent_id": agent_id,
+                    "agent_name": agent.get("name", ""),
                     "duration": duration,
                     "status": "ok",
+                    "result_summary": (result.content or "")[:500],
                 },
             )
         elif isinstance(error, EscalateError):

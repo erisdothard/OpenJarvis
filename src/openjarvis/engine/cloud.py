@@ -127,6 +127,10 @@ def _is_google_model(model: str) -> bool:
     return "gemini" in model.lower() and not _is_openrouter_model(model)
 
 
+def _is_groq_model(model: str) -> bool:
+    return model.startswith("groq/")
+
+
 def _is_openai_reasoning_model(model: str) -> bool:
     """Check if model is an OpenAI reasoning model that restricts temperature."""
     m = model.lower()
@@ -280,6 +284,7 @@ class CloudEngine(InferenceEngine):
         self._google_client: Any = None
         self._openrouter_client: Any = None
         self._minimax_client: Any = None
+        self._groq_client: Any = None
         self._codex_client: Any = None
         # Gemini thought_signatures: tool_call_id -> signature bytes
         self._thought_sigs: Dict[str, bytes] = {}
@@ -329,6 +334,17 @@ class CloudEngine(InferenceEngine):
                 self._minimax_client = openai.OpenAI(
                     base_url="https://api.minimax.io/v1",
                     api_key=minimax_key,
+                )
+            except ImportError:
+                pass
+        groq_key = os.environ.get("GROQ_API_KEY")
+        if groq_key:
+            try:
+                import openai
+
+                self._groq_client = openai.OpenAI(
+                    base_url="https://api.groq.com/openai/v1",
+                    api_key=groq_key,
                 )
             except ImportError:
                 pass
@@ -912,6 +928,46 @@ class CloudEngine(InferenceEngine):
             "ttft": elapsed,
         }
 
+    def _generate_groq(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        if self._groq_client is None:
+            raise EngineConnectionError(
+                "Groq client not available — set GROQ_API_KEY"
+            )
+        bare_model = model.removeprefix("groq/")
+        kwargs.pop("response_format", None)
+        create_kwargs: Dict[str, Any] = {
+            "model": bare_model,
+            "messages": messages_to_dicts(messages),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        t0 = time.monotonic()
+        resp = self._groq_client.chat.completions.create(**create_kwargs)
+        elapsed = time.monotonic() - t0
+        choice = resp.choices[0]
+        usage = resp.usage
+        prompt_tokens = usage.prompt_tokens if usage else 0
+        completion_tokens = usage.completion_tokens if usage else 0
+        return {
+            "content": choice.message.content or "",
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": (usage.total_tokens if usage else 0),
+            },
+            "model": resp.model,
+            "finish_reason": choice.finish_reason or "stop",
+            "ttft": elapsed,
+        }
+
     def _generate_minimax(
         self,
         messages: Sequence[Message],
@@ -984,6 +1040,8 @@ class CloudEngine(InferenceEngine):
             return self._generate_codex(messages, **kw)
         if _is_openrouter_model(model):
             return self._generate_openrouter(messages, **kw)
+        if _is_groq_model(model):
+            return self._generate_groq(messages, **kw)
         if _is_minimax_model(model):
             return self._generate_minimax(messages, **kw)
         if _is_anthropic_model(model):
@@ -1012,6 +1070,9 @@ class CloudEngine(InferenceEngine):
                 yield token
         elif _is_openrouter_model(model):
             async for token in self._stream_openrouter(messages, **kw):
+                yield token
+        elif _is_groq_model(model):
+            async for token in self._stream_groq(messages, **kw):
                 yield token
         elif _is_minimax_model(model):
             async for token in self._stream_minimax(messages, **kw):
@@ -1196,6 +1257,31 @@ class CloudEngine(InferenceEngine):
             "stream": True,
         }
         resp = self._openrouter_client.chat.completions.create(**create_kwargs)
+        for chunk in resp:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                yield delta.content
+
+    async def _stream_groq(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        if self._groq_client is None:
+            raise EngineConnectionError("Groq client not available — set GROQ_API_KEY")
+        bare_model = model.removeprefix("groq/")
+        create_kwargs: Dict[str, Any] = {
+            "model": bare_model,
+            "messages": messages_to_dicts(messages),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+        resp = self._groq_client.chat.completions.create(**create_kwargs)
         for chunk in resp:
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:

@@ -161,7 +161,7 @@ class KnowledgeStore(MemoryBackend):
 
             db_path = DEFAULT_CONFIG_DIR / "knowledge.db"
 
-        self._db_path = str(db_path)
+        self._db_path = str(Path(db_path).expanduser())
         # Ensure the parent directory exists (skip for :memory:)
         if self._db_path != ":memory:":
             from openjarvis.security.file_utils import secure_create

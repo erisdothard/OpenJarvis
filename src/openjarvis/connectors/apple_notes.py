@@ -24,6 +24,7 @@ bytes, decoding to UTF-8, and stripping protobuf control bytes.
 from __future__ import annotations
 
 import gzip
+import logging
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,8 @@ from typing import Iterator, List, Optional
 from openjarvis.connectors._stubs import BaseConnector, Document, SyncStatus
 from openjarvis.core.registry import ConnectorRegistry
 from openjarvis.tools._stubs import ToolSpec
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -134,8 +137,29 @@ class AppleNotesConnector(BaseConnector):
     # ------------------------------------------------------------------
 
     def is_connected(self) -> bool:
-        """Return ``True`` if NoteStore.sqlite exists at the configured path."""
-        return self._db_path.exists()
+        """Return ``True`` if NoteStore.sqlite exists and is readable.
+
+        If the file exists but cannot be opened, this almost certainly means
+        Full Disk Access has not been granted.  The method logs a clear
+        diagnostic so the user knows what to fix.
+        """
+        if not self._db_path.exists():
+            return False
+        try:
+            conn = sqlite3.connect(
+                f"file:{self._db_path}?mode=ro", uri=True
+            )
+            conn.execute("SELECT 1 FROM ZICCLOUDSYNCINGOBJECT LIMIT 1")
+            conn.close()
+            return True
+        except sqlite3.OperationalError:
+            logger.warning(
+                "Apple Notes database exists at %s but cannot be read. "
+                "Grant Full Disk Access to this process in "
+                "System Settings → Privacy & Security → Full Disk Access.",
+                self._db_path,
+            )
+            return False
 
     def disconnect(self) -> None:
         """Mark the connector as disconnected."""
@@ -168,6 +192,13 @@ class AppleNotesConnector(BaseConnector):
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         except sqlite3.OperationalError:
+            logger.warning(
+                "Cannot open Apple Notes database at %s — "
+                "Full Disk Access is likely not granted. "
+                "Go to System Settings → Privacy & Security → Full Disk Access "
+                "and add this application.",
+                db_path,
+            )
             return
 
         try:

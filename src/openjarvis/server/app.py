@@ -16,6 +16,7 @@ from openjarvis.server.comparison import comparison_router
 from openjarvis.server.connectors_router import create_connectors_router
 from openjarvis.server.dashboard import dashboard_router
 from openjarvis.server.digest_routes import create_digest_router
+from openjarvis.server.livekit_routes import router as livekit_router
 from openjarvis.server.research_router import router as research_router
 from openjarvis.server.routes import router
 from openjarvis.server.upload_router import router as upload_router
@@ -225,6 +226,19 @@ def create_app(
     app.state.agent_manager = agent_manager
     app.state.agent_scheduler = agent_scheduler
     app.state.session_start = time.time()
+
+    # Pre-warm TTS backend so the first voice response has no cold-start lag
+    try:
+        from openjarvis.core.registry import TTSRegistry
+        import openjarvis.speech.kokoro_tts  # noqa: F401
+        tts_cache: dict = {}
+        if TTSRegistry.contains("kokoro"):
+            backend = TTSRegistry.get("kokoro")()
+            backend.synthesize("warm", voice_id="af_heart")
+            tts_cache["kokoro"] = backend
+        app.state._tts_cache = tts_cache
+    except Exception:
+        app.state._tts_cache = {}
     # Exposed so WebSocket handlers can authenticate the handshake (the HTTP
     # AuthMiddleware never sees WS upgrade requests). Empty = auth disabled.
     app.state.api_key = api_key
@@ -295,7 +309,17 @@ def create_app(
     app.include_router(upload_router)
     app.include_router(research_router)
     app.include_router(analytics_router)
+    app.include_router(livekit_router)
     include_all_routes(app)
+
+    # Desktop alerting on agent failures
+    if bus is not None:
+        try:
+            from openjarvis.agents.alerting import AlertSubscriber
+
+            app.state.alert_subscriber = AlertSubscriber(bus)
+        except Exception as exc:
+            logger.debug("Alert subscriber init skipped: %s", exc)
 
     # Restore SendBlue channel bindings from database on startup
     _restore_sendblue_bindings(app)

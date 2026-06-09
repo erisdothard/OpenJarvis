@@ -4,26 +4,10 @@ import { fetchManagedAgents } from '../lib/api';
 
 type PulseState = 'idle' | 'inferencing' | 'agent-active' | 'hidden';
 
-const PULSE_CONFIG: Record<Exclude<PulseState, 'hidden'>, { color: string; animation: string }> = {
-  idle: {
-    color: 'color-mix(in srgb, var(--color-accent) 22%, transparent)',
-    animation: 'none',
-  },
-  inferencing: {
-    color: 'var(--color-accent)',
-    animation: 'pulse-glow 2s ease-in-out infinite',
-  },
-  'agent-active': {
-    color: 'var(--color-accent-purple)',
-    animation: 'pulse-travel 3s linear infinite',
-  },
-};
-
 export function SystemPulse({ apiReachable }: { apiReachable: boolean | null }) {
   const isStreaming = useAppStore((s) => s.streamState.isStreaming);
   const [hasRunningAgent, setHasRunningAgent] = useState(false);
 
-  // Poll for running agents every 30s
   useEffect(() => {
     if (apiReachable === false) return;
     const check = () =>
@@ -37,24 +21,33 @@ export function SystemPulse({ apiReachable }: { apiReachable: boolean | null }) 
 
   if (apiReachable === false) return null;
 
-  // Priority: agent-active > inferencing > idle
   let state: PulseState = 'idle';
   if (isStreaming) state = 'inferencing';
   if (hasRunningAgent) state = 'agent-active';
 
-  const config = PULSE_CONFIG[state];
-  const isTravel = state === 'agent-active';
+  const styles: Record<Exclude<PulseState, 'hidden'>, React.CSSProperties> = {
+    idle: {
+      background: 'linear-gradient(90deg, transparent 10%, rgba(0, 229, 255, 0.08) 50%, transparent 90%)',
+      height: '1px',
+    },
+    inferencing: {
+      background: 'linear-gradient(90deg, #ff0080, #ff6d00, #ffea00, #00ff87, #00e5ff, #8c00ff, #ff0080)',
+      backgroundSize: '300% 100%',
+      animation: 'chroma-travel 2s linear infinite',
+      height: '2px',
+    },
+    'agent-active': {
+      background: 'linear-gradient(90deg, #00e5ff, #00ff87, #ffea00, #ff6d00, #ff0080, #8c00ff, #00e5ff)',
+      backgroundSize: '300% 100%',
+      animation: 'chroma-travel 1.2s linear infinite',
+      height: '2px',
+    },
+  };
 
   return (
     <div
-      className="fixed top-0 left-0 right-0 h-[3px] z-50"
-      style={{
-        background: isTravel
-          ? `linear-gradient(90deg, transparent, ${config.color}, transparent)`
-          : `linear-gradient(90deg, transparent 5%, ${config.color} 30%, ${config.color} 70%, transparent 95%)`,
-        backgroundSize: isTravel ? '200% 100%' : '100% 100%',
-        animation: config.animation,
-      }}
+      className="fixed top-0 left-0 right-0 z-50"
+      style={styles[state]}
     />
   );
 }

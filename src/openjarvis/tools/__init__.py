@@ -142,4 +142,19 @@ try:
 except ImportError:
     pass
 
+try:
+    import openjarvis.tools.linkedin  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.jobright  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.connector_tools  # noqa: F401
+except ImportError:
+    pass
+
 __all__ = ["BaseTool", "ToolExecutor", "ToolSpec"]

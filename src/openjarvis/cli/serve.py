@@ -51,6 +51,11 @@ def serve(
     agent_name: str | None,
 ) -> None:
     """Start the OpenAI-compatible API server."""
+    # Set up rotating log files for background/daemon operation
+    from openjarvis.cli.log_config import setup_server_logging
+
+    setup_server_logging()
+
     print_banner(quiet=(ctx.obj or {}).get("quiet", False))
     console = Console(stderr=True)
 
@@ -370,6 +375,26 @@ def serve(
             system = SystemBuilder(config).build()
             executor.set_system(system)
 
+            # Auto-create morning_digest managed agent if digest is enabled
+            # and no morning_digest agent exists yet.
+            if getattr(config, "digest", None) and getattr(config.digest, "enabled", False):
+                existing_types = {
+                    a.get("agent_type") for a in agent_manager.list_agents()
+                }
+                if "morning_digest" not in existing_types:
+                    agent_manager.create_agent(
+                        name="Morning Digest",
+                        agent_type="morning_digest",
+                        config={
+                            "model": "groq/llama-3.3-70b-versatile",
+                            "model_fallback_chain": "groq/llama-3.3-70b-versatile,qwen3:8b",
+                            "schedule_type": "cron",
+                            "schedule_value": getattr(config.digest, "schedule", "0 6 * * *"),
+                            "tools": ["digest_collect"],
+                        },
+                    )
+                    console.print("  Digest:    [cyan]auto-registered[/cyan]")
+
             agent_scheduler = AgentScheduler(
                 manager=agent_manager,
                 executor=executor,
@@ -392,6 +417,7 @@ def serve(
     if config.agent.context_from_memory:
         try:
             import openjarvis.tools.storage  # noqa: F401
+            import openjarvis.connectors.store  # noqa: F401  # register "knowledge" backend
             from openjarvis.core.registry import MemoryRegistry
 
             mem_key = config.memory.default_backend
@@ -403,6 +429,86 @@ def serve(
                 console.print("  Memory:    [cyan]active[/cyan]")
         except Exception as exc:
             logger.debug("Memory backend init failed: %s", exc)
+
+    # --- Connector SyncScheduler: periodic re-sync for data sources ---
+    sync_scheduler = None
+    if memory_backend is not None:
+        try:
+            from openjarvis.connectors.pipeline import IngestionPipeline
+            from openjarvis.connectors.scheduler import SyncScheduler
+            from openjarvis.connectors.store import KnowledgeStore
+            from openjarvis.connectors.sync_engine import SyncEngine
+            from openjarvis.core.registry import ConnectorRegistry
+
+            import openjarvis.connectors  # noqa: F401  # trigger registration
+
+            # Build the sync pipeline targeting the same KnowledgeStore
+            # the memory backend reads from.
+            _sync_store = KnowledgeStore(db_path=config.memory.db_path)
+            _sync_pipeline = IngestionPipeline(store=_sync_store)
+            _sync_engine = SyncEngine(pipeline=_sync_pipeline)
+
+            # Default: sync every hour (3600s). Config knob via raw TOML.
+            _sync_interval = 3600
+            try:
+                import tomllib as _toml
+                from openjarvis.core.config import DEFAULT_CONFIG_PATH
+
+                _cfg_path = DEFAULT_CONFIG_PATH
+                if _cfg_path.exists():
+                    with open(_cfg_path, "rb") as _sf:
+                        _raw_toml = _toml.load(_sf)
+                    _sync_interval = int(
+                        _raw_toml.get("connectors", {})
+                        .get("sync_interval", _sync_interval)
+                    )
+            except Exception:
+                pass
+
+            sync_scheduler = SyncScheduler(
+                _sync_engine, interval_seconds=_sync_interval
+            )
+
+            _registered = 0
+            for _cid in sorted(ConnectorRegistry.keys()):
+                try:
+                    _cls = ConnectorRegistry.get(_cid)
+                    _inst = _cls()
+                    if _inst.is_connected():
+                        sync_scheduler.add(_inst)
+                        _registered += 1
+                except Exception:
+                    pass
+
+            if _registered > 0:
+                # Run an immediate first sync in a background thread so
+                # server startup isn't blocked, then start the periodic loop.
+                import threading
+
+                def _initial_sync() -> None:
+                    try:
+                        results = sync_scheduler.run_once()
+                        total = sum(results.values())
+                        logger.info(
+                            "Initial sync complete: %d new items across %d connectors",
+                            total,
+                            len(results),
+                        )
+                    except Exception as exc:
+                        logger.error("Initial sync failed: %s", exc)
+
+                threading.Thread(
+                    target=_initial_sync, daemon=True, name="initial_sync"
+                ).start()
+                sync_scheduler.start()
+                console.print(
+                    f"  Sync:      [cyan]{_registered} connectors[/cyan] "
+                    f"(every {_sync_interval}s)"
+                )
+            else:
+                sync_scheduler = None
+        except Exception as exc:
+            logger.debug("SyncScheduler init failed: %s", exc)
 
     # --- Channel Gateway: API key, sessions, ChannelBridge ---
     import os as _os

@@ -25,32 +25,24 @@ export function Layout() {
   const navigate = useNavigate();
 
   return (
-    <div className="flex flex-col h-full w-full overflow-hidden relative" style={{ paddingTop: '3px' }}>
-      <div className="hud-backdrop" aria-hidden="true" />
+    <div className="flex flex-col h-full w-full overflow-hidden relative" style={{ background: 'var(--color-bg)' }}>
+      {/* Chromatic ambient glow — slowly shifting spectral light in the void */}
+      <div className="chromatic-ambient-glow" />
       <SystemPulse apiReachable={apiReachable} />
       <ApprovalBell />
 
-      {/* Health check banner */}
       {apiReachable === false && (
-        <div
-          className="flex items-center gap-3 px-4 py-2 text-sm shrink-0"
-          style={{
-            background: 'color-mix(in srgb, var(--color-error) 8%, transparent)',
-            borderBottom: '1px solid color-mix(in srgb, var(--color-error) 15%, transparent)',
-            color: 'var(--color-text)',
-          }}
+        <div className="flex items-center gap-3 px-4 py-2.5 text-sm shrink-0 border-b border-[var(--color-border)]"
+          style={{ background: 'rgba(248, 113, 113, 0.04)' }}
         >
-          <span
-            className="w-1.5 h-1.5 rounded-full shrink-0"
-            style={{ background: 'var(--color-error)' }}
-          />
-          <span>Cannot reach OpenJarvis backend</span>
+          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: 'var(--color-error)' }} />
+          <span className="text-[var(--color-text)] font-medium">Backend offline</span>
           <button
             onClick={() => navigate('/settings')}
-            className="text-sm underline cursor-pointer ml-auto shrink-0"
+            className="text-sm cursor-pointer ml-auto shrink-0 font-medium"
             style={{ color: 'var(--color-accent)' }}
           >
-            Change URL
+            Configure
           </button>
         </div>
       )}
@@ -59,12 +51,12 @@ export function Layout() {
         <Sidebar />
         {sidebarOpen && (
           <div
-            className="fixed inset-0 z-20 bg-black/40 md:hidden"
+            className="fixed inset-0 z-20 bg-black/50 md:hidden backdrop-blur-sm"
             onClick={() => useAppStore.getState().setSidebarOpen(false)}
           />
         )}
-        <main className="flex-1 flex flex-col min-w-0 h-full relative overflow-hidden" style={{ background: 'transparent' }}>
-          <div className="flex-1 flex flex-col min-w-0 min-h-0 relative z-[2]">
+        <main className="flex-1 flex flex-col min-w-0 h-full relative overflow-hidden">
+          <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
             <Outlet />
           </div>
         </main>

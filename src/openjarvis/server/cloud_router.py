@@ -55,6 +55,8 @@ def _load_keys() -> dict[str, str]:
         "GOOGLE_API_KEY",
         "OPENROUTER_API_KEY",
         "MINIMAX_API_KEY",
+        "GROQ_API_KEY",
+        "DEEPSEEK_API_KEY",
     ):
         val = os.environ.get(name)
         if val:
@@ -72,6 +74,10 @@ def get_provider(model: str) -> str | None:
         return "google"
     if any(model.startswith(p) for p in _MINIMAX_PREFIXES):
         return "minimax"
+    if model.startswith("groq/"):
+        return "groq"
+    if model.startswith("deepseek/"):
+        return "deepseek"
     if any(model.startswith(org) for org in _LOCAL_HF_ORGS):
         return None  # local model, never route to cloud
     if "/" in model:  # openrouter format: "meta-llama/llama-3-8b"
@@ -392,6 +398,42 @@ async def stream_cloud(
             max_tokens,
             base_url="https://api.minimax.io/v1",
             api_key_name="MINIMAX_API_KEY",
+        ):
+            yield token
+
+    elif provider == "groq":
+        keys = _load_keys()
+        api_key = keys.get("GROQ_API_KEY", "")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY not set — add it in the Cloud Models tab")
+        # Strip "groq/" prefix — Groq API expects bare model names
+        bare_model = model.removeprefix("groq/")
+        async for token in _stream_openai(
+            bare_model,
+            messages,
+            temperature,
+            max_tokens,
+            base_url="https://api.groq.com/openai/v1",
+            api_key_name="GROQ_API_KEY",
+        ):
+            yield token
+
+    elif provider == "deepseek":
+        keys = _load_keys()
+        api_key = keys.get("DEEPSEEK_API_KEY", "")
+        if not api_key:
+            raise ValueError(
+                "DEEPSEEK_API_KEY not set — add it in the Cloud Models tab"
+            )
+        # Strip "deepseek/" prefix — DeepSeek API expects bare model names
+        bare_model = model.removeprefix("deepseek/")
+        async for token in _stream_openai(
+            bare_model,
+            messages,
+            temperature,
+            max_tokens,
+            base_url="https://api.deepseek.com/v1",
+            api_key_name="DEEPSEEK_API_KEY",
         ):
             yield token
 
