@@ -40,7 +40,7 @@ enabled = true
 # PILLAR 4: Engine — The Inference Runtime
 # ═══════════════════════════════════════════════════════════════
 [engine]
-default = "cloud"                            # Cloud primary
+default = "ollama"                           # Local primary, cloud via router
 
 [engine.cloud]
 # API key loaded from ANTHROPIC_API_KEY env var
@@ -106,20 +106,26 @@ persona = "eris"                             # Custom persona
 honorific = "Eris"                           # Use first name, not "sir"
 voice_speed = 1.0
 tts_backend = "cartesia"
-sections = ["messages", "calendar", "health", "world"]
+sections = ["messages", "calendar", "health", "world", "social", "music"]
 
 [digest.messages]
-sources = ["gmail", "imessage", "slack", "github_notifications"]
+sources = ["gmail", "imessage", "outlook", "slack", "github_notifications"]
 priority_contacts = []                       # Add key contacts here
 
 [digest.calendar]
-sources = ["gcalendar"]
+sources = ["gcalendar", "apple_calendar"]
 
 [digest.health]
 sources = ["apple_health"]
 
 [digest.world]
 sources = ["weather", "hackernews", "news_rss"]
+
+[digest.social]
+sources = ["linkedin", "instagram", "facebook"]
+
+[digest.music]
+sources = ["spotify"]
 
 # ═══════════════════════════════════════════════════════════════
 # Memory & Persona

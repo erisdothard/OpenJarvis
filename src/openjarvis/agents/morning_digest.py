@@ -10,6 +10,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional
+from zoneinfo import ZoneInfo
 
 from openjarvis.agents._stubs import AgentContext, AgentResult, ToolUsingAgent
 from openjarvis.agents.digest_store import DigestArtifact, DigestStore
@@ -53,7 +54,10 @@ class MorningDigestAgent(ToolUsingAgent):
     def _build_system_prompt(self) -> str:
         """Assemble the system prompt from persona + briefing structure."""
         persona_text = _load_persona(self._persona)
-        now = datetime.now()
+        try:
+            now = datetime.now(ZoneInfo(self._timezone))
+        except Exception:
+            now = datetime.now()
         honorific = getattr(self, "_honorific", "sir")
 
         return (
@@ -74,12 +78,16 @@ class MorningDigestAgent(ToolUsingAgent):
             "2. SCHEDULE — Today's upcoming events with time context: 'You "
             "have 3 hours before your next meeting.' Skip past events.\n\n"
             "3. MESSAGES — Triage across ALL channels (email, texts, Slack):\n"
-            "  - First: messages from real people needing a REPLY or DECISION\n"
-            "  - Second: messages containing deadlines or action items\n"
-            "  - Last: brief acknowledgment of casual threads ('Your group "
-            "chat has been lively but nothing requiring a response')\n"
+            "  - Emails tagged [IMPORTANT] are HIGH PRIORITY — summarize their "
+            "content, who sent them, and what action is needed\n"
+            "  - Emails tagged [REPLIED] mean the user already responded — "
+            "acknowledge briefly but do NOT say 'you need to reply'\n"
+            "  - Emails tagged [UNREAD] from real people need attention — "
+            "summarize what they say and what response is expected\n"
+            "  - Connect related items: if an email mentions an interview, "
+            "check calendar for the corresponding event and mention both\n"
             "  - SKIP automated emails, newsletters, and marketing entirely\n"
-            "  - Quote relevant message text when it helps\n\n"
+            "  - Quote relevant message text when it adds context\n\n"
             "4. HEALTH — Interpret trends, not raw numbers. 'Your sleep has "
             "improved three nights running and your readiness is strong' — "
             "not 'HRV 53, HR 56.' If multiple days of data, compare.\n\n"
@@ -106,12 +114,14 @@ class MorningDigestAgent(ToolUsingAgent):
                 "slack",
                 "google_tasks",
                 "imessage",
+                "outlook",
                 "github_notifications",
             ],
-            "calendar": ["gcalendar"],
+            "calendar": ["gcalendar", "apple_calendar"],
             "health": ["oura", "apple_health"],
             "world": ["weather", "hackernews", "news_rss"],
             "music": ["spotify", "apple_music"],
+            "social": ["linkedin", "instagram", "facebook"],
         }
         sources = set()
         for section in self._sections:

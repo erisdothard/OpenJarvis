@@ -106,6 +106,18 @@ _CODEX_MODELS = [
     "codex/gpt-5-mini-2025-08-07",
 ]
 
+_GROQ_MODELS = [
+    "groq/llama-3.3-70b-versatile",
+    "groq/llama-3.1-8b-instant",
+    "groq/gemma2-9b-it",
+    "groq/mixtral-8x7b-32768",
+]
+
+_DEEPSEEK_MODELS = [
+    "deepseek/deepseek-chat",
+    "deepseek/deepseek-reasoner",
+]
+
 
 def _is_minimax_model(model: str) -> bool:
     return model.lower().startswith("minimax")
@@ -129,6 +141,10 @@ def _is_google_model(model: str) -> bool:
 
 def _is_groq_model(model: str) -> bool:
     return model.startswith("groq/")
+
+
+def _is_deepseek_model(model: str) -> bool:
+    return model.startswith("deepseek/")
 
 
 def _is_openai_reasoning_model(model: str) -> bool:
@@ -285,12 +301,28 @@ class CloudEngine(InferenceEngine):
         self._openrouter_client: Any = None
         self._minimax_client: Any = None
         self._groq_client: Any = None
+        self._deepseek_client: Any = None
         self._codex_client: Any = None
         # Gemini thought_signatures: tool_call_id -> signature bytes
         self._thought_sigs: Dict[str, bytes] = {}
         self._init_clients()
 
     def _init_clients(self) -> None:
+        # Load API keys from ~/.openjarvis/cloud-keys.env so the engine works
+        # even when the server is started without keys in os.environ (e.g.
+        # launchd).  Process env vars override file values.
+        from pathlib import Path
+
+        _keys_file = Path.home() / ".openjarvis" / "cloud-keys.env"
+        if _keys_file.exists():
+            for raw in _keys_file.read_text().splitlines():
+                line = raw.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip()
+                    if v and not os.environ.get(k):
+                        os.environ[k] = v
+
         if os.environ.get("OPENAI_API_KEY"):
             try:
                 import openai
@@ -345,6 +377,17 @@ class CloudEngine(InferenceEngine):
                 self._groq_client = openai.OpenAI(
                     base_url="https://api.groq.com/openai/v1",
                     api_key=groq_key,
+                )
+            except ImportError:
+                pass
+        deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
+        if deepseek_key:
+            try:
+                import openai
+
+                self._deepseek_client = openai.OpenAI(
+                    base_url="https://api.deepseek.com",
+                    api_key=deepseek_key,
                 )
             except ImportError:
                 pass
@@ -1366,6 +1409,32 @@ class CloudEngine(InferenceEngine):
                 "stream": True,
                 **kwargs,
             }
+        elif _is_groq_model(model):
+            client = self._groq_client
+            if client is None:
+                raise EngineConnectionError("Groq client not available — set GROQ_API_KEY")
+            bare_model = model.removeprefix("groq/")
+            create_kwargs = {
+                "model": bare_model,
+                "messages": messages_to_dicts(messages),
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream": True,
+                **kwargs,
+            }
+        elif _is_deepseek_model(model):
+            client = self._deepseek_client
+            if client is None:
+                raise EngineConnectionError("DeepSeek client not available — set DEEPSEEK_API_KEY")
+            bare_model = model.removeprefix("deepseek/")
+            create_kwargs = {
+                "model": bare_model,
+                "messages": messages_to_dicts(messages),
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream": True,
+                **kwargs,
+            }
         else:
             client = self._openai_client
             if client is None:
@@ -1516,6 +1585,11 @@ class CloudEngine(InferenceEngine):
         elif _is_google_model(model):
             async for chunk in super().stream_full(messages, **kw):
                 yield chunk
+        elif _is_groq_model(model) or _is_deepseek_model(model):
+            # Groq and DeepSeek are OpenAI-compatible — route through the
+            # same handler which now selects the correct client internally.
+            async for chunk in self._stream_full_openai(messages, **kw):
+                yield chunk
         else:
             async for chunk in self._stream_full_openai(messages, **kw):
                 yield chunk
@@ -1532,6 +1606,10 @@ class CloudEngine(InferenceEngine):
             models.extend(_OPENROUTER_POPULAR)
         if self._minimax_client is not None:
             models.extend(_MINIMAX_MODELS)
+        if self._groq_client is not None:
+            models.extend(_GROQ_MODELS)
+        if self._deepseek_client is not None:
+            models.extend(_DEEPSEEK_MODELS)
         if self._codex_client is not None:
             models.extend(_CODEX_MODELS)
         return models
@@ -1543,6 +1621,8 @@ class CloudEngine(InferenceEngine):
             or self._google_client is not None
             or self._openrouter_client is not None
             or self._minimax_client is not None
+            or self._groq_client is not None
+            or self._deepseek_client is not None
             or self._codex_client is not None
         )
 

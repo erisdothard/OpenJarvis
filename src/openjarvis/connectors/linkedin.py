@@ -111,6 +111,20 @@ def _li_fetch_profile(token: str) -> Dict[str, Any]:
     return resp.json()
 
 
+def _li_fetch_posts(token: str, author_urn: str, count: int = 25) -> List[Dict[str, Any]]:
+    """Fetch recent posts authored by the user via Community Management API."""
+    try:
+        data = _li_api_get(
+            token,
+            "posts",
+            params={"author": author_urn, "q": "author", "count": str(count)},
+        )
+        return data.get("elements", [])
+    except httpx.HTTPStatusError as exc:
+        _log.warning("Failed to fetch LinkedIn posts: %s", exc)
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Connector
 # ---------------------------------------------------------------------------
@@ -170,17 +184,19 @@ class LinkedInConnector(BaseConnector):
     def sync(
         self, *, since: Optional[datetime] = None, cursor: Optional[str] = None
     ) -> Iterator[Document]:
-        """Yield a Document for the user's LinkedIn profile."""
+        """Yield Documents for the user's LinkedIn profile and recent posts."""
         token = self._get_access_token()
         if not token:
             return
+
+        member_id = self._get_member_id()
 
         # Sync profile info
         try:
             profile = _li_fetch_profile(token)
             name = profile.get("name", "")
             email = profile.get("email", "")
-            sub = profile.get("sub", self._get_member_id())
+            sub = profile.get("sub", member_id)
 
             yield Document(
                 doc_id=f"linkedin-profile-{sub}",
@@ -197,6 +213,45 @@ class LinkedInConnector(BaseConnector):
             )
         except (httpx.HTTPStatusError, PermissionError) as exc:
             _log.warning("Failed to fetch LinkedIn profile: %s", exc)
+
+        # Sync posts
+        try:
+            author_urn = self._get_author_urn()
+            posts = _li_fetch_posts(token, author_urn)
+            for post in posts:
+                # Parse created timestamp (epoch ms)
+                created_at = post.get("createdAt", 0)
+                ts = (
+                    datetime.fromtimestamp(created_at / 1000)
+                    if created_at
+                    else datetime.now()
+                )
+
+                if since and ts < since:
+                    continue
+
+                post_id = post.get("id", "")
+                commentary = post.get("commentary", "")
+                visibility = post.get("visibility", "")
+                likes = post.get("likeCount", 0)
+                comments = post.get("commentCount", 0)
+
+                yield Document(
+                    doc_id=f"linkedin-post-{post_id}",
+                    source="linkedin",
+                    doc_type="post",
+                    content=commentary,
+                    title=commentary[:80] if commentary else "LinkedIn Post",
+                    timestamp=ts,
+                    metadata={
+                        "post_id": post_id,
+                        "visibility": visibility,
+                        "like_count": likes,
+                        "comment_count": comments,
+                    },
+                )
+        except (httpx.HTTPStatusError, PermissionError) as exc:
+            _log.warning("Failed to fetch LinkedIn posts: %s", exc)
 
         self._status.state = "idle"
         self._status.last_sync = datetime.now()

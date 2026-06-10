@@ -350,8 +350,8 @@ export async function synthesizeSpeech(text: string, voiceId?: string): Promise<
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       text,
-      voice_id: voiceId || 'af_heart',
-      backend: 'kokoro',
+      voice_id: voiceId || 'a0e99841-438c-4a64-b679-ae501e7d6091',
+      backend: 'cartesia',
       speed: 1.0,
     }),
   });

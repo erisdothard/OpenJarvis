@@ -37,7 +37,11 @@ class MultiEngine(InferenceEngine):
             except Exception as exc:
                 logger.debug("Failed to list models for %s: %s", _key, exc)
 
-    _CLOUD_PREFIXES = ("gpt-", "o1-", "o3-", "o4-", "claude-", "gemini-", "openrouter/")
+    _CLOUD_PREFIXES = (
+        "gpt-", "o1-", "o3-", "o4-", "claude-", "gemini-",
+        "openrouter/", "groq/", "deepseek/", "codex/",
+        "MiniMax-",
+    )
 
     def _engine_for(self, model: str) -> InferenceEngine:
         """Find the engine that owns a model, refreshing the map once if needed."""

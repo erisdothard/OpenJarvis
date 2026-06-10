@@ -68,7 +68,31 @@ GOOGLE_ALL_SCOPES: List[str] = [
     "https://www.googleapis.com/auth/tasks.readonly",
 ]
 
+MICROSOFT_SCOPES: List[str] = [
+    "offline_access",
+    "Mail.Read",
+    "Mail.ReadWrite",
+    "User.Read",
+]
+
 OAUTH_PROVIDERS: Dict[str, OAuthProvider] = {
+    "microsoft": OAuthProvider(
+        name="microsoft",
+        display_name="Microsoft",
+        auth_endpoint="https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize",
+        token_endpoint="https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+        scopes=MICROSOFT_SCOPES,
+        setup_url="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+        setup_hint=(
+            "Azure AD → App registrations → New → "
+            "Redirect URI: http://localhost:8789/callback → "
+            "Certificates & secrets → New client secret"
+        ),
+        callback_host="localhost",
+        extra_auth_params={"prompt": "consent"},
+        connector_ids=("outlook",),
+        credential_files=("outlook.json",),
+    ),
     "google": OAuthProvider(
         name="google",
         display_name="Google",
@@ -273,6 +297,60 @@ def delete_tokens(path: str) -> None:
     p = Path(path)
     if p.exists():
         p.unlink()
+
+
+def refresh_microsoft_token(path: str) -> Optional[str]:
+    """Refresh a Microsoft access token using the stored refresh token.
+
+    Returns the new access token, or ``None`` on failure.
+    """
+    import httpx
+
+    tokens = load_tokens(path)
+    if not tokens:
+        return None
+    refresh_token = tokens.get("refresh_token")
+    client_id = tokens.get("client_id")
+    client_secret = tokens.get("client_secret")
+    if not (refresh_token and client_id and client_secret):
+        return None
+
+    try:
+        resp = httpx.post(
+            "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+                "scope": " ".join(MICROSOFT_SCOPES),
+            },
+            timeout=15.0,
+        )
+    except httpx.HTTPError:
+        return None
+    if resp.status_code >= 400:
+        return None
+
+    body = resp.json()
+    new_access = body.get("access_token")
+    if not new_access:
+        return None
+
+    # Microsoft may return a new refresh_token — keep it if present.
+    tokens.update(
+        {
+            "access_token": new_access,
+            "token": new_access,
+            "token_type": body.get("token_type", "Bearer"),
+            "expires_in": body.get("expires_in", 3600),
+        }
+    )
+    new_refresh = body.get("refresh_token")
+    if new_refresh:
+        tokens["refresh_token"] = new_refresh
+    save_tokens(path, tokens)
+    return new_access
 
 
 def refresh_google_token(path: str) -> Optional[str]:

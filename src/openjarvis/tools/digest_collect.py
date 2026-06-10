@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from openjarvis.connectors._stubs import Document
@@ -64,9 +64,9 @@ def _format_duration(seconds: float) -> str:
 
 def _time_ago(ts: datetime) -> str:
     """Return a human-readable relative time like '2h ago' or '15m ago'."""
-    now = datetime.now()
-    ts_naive = ts.replace(tzinfo=None) if ts.tzinfo else ts
-    delta = now - ts_naive
+    now = datetime.now(tz=timezone.utc)
+    ts_aware = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    delta = now - ts_aware
     total_seconds = max(0, int(delta.total_seconds()))
     if total_seconds < 60:
         return "just now"
@@ -159,17 +159,38 @@ def _format_strava(doc: Document) -> str:
 
 
 def _format_gmail(doc: Document) -> str:
-    """Format a Gmail email document.
+    """Format a Gmail email document with triage context.
 
-    Includes ``doc_id`` so the proactive agent can reference the
-    real Gmail ``messages.get/modify`` id in its action proposals
-    instead of hallucinating one.
+    Includes reply status, importance flag, thread depth, and a longer
+    body preview so the LLM can make informed triage decisions.
     """
     sender = doc.author or "Unknown"
     subject = doc.title or "(no subject)"
     ago = _time_ago(doc.timestamp)
-    body = doc.content.replace("\n", " ").strip()[:150] if doc.content else ""
-    line = f'[gmail id={doc.doc_id}] From: {sender} — "{subject}" ({ago})'
+
+    # Triage metadata (set by _triage_email_threads, may be absent)
+    replied = doc.metadata.get("_replied", False)
+    importance = doc.metadata.get("_importance", "normal")
+    thread_count = doc.metadata.get("_thread_count", 1)
+
+    # Status tags
+    tags: List[str] = []
+    if importance == "high":
+        tags.append("IMPORTANT")
+    if replied:
+        tags.append("REPLIED")
+    elif "UNREAD" in doc.metadata.get("labels", []):
+        tags.append("UNREAD")
+    if thread_count > 1:
+        tags.append(f"{thread_count} msgs in thread")
+
+    tag_str = f" [{', '.join(tags)}]" if tags else ""
+
+    # Longer body preview for important emails, shorter for low
+    max_preview = 400 if importance == "high" else 200
+    body = doc.content.replace("\n", " ").strip()[:max_preview] if doc.content else ""
+
+    line = f'[gmail id={doc.doc_id}]{tag_str} From: {sender} — "{subject}" ({ago})'
     if body:
         line += f"\n  Preview: {body}"
     return line
@@ -400,7 +421,16 @@ def _format_linkedin(doc: Document) -> str:
         email = data.get("email", "")
         email_str = f" ({email})" if email else ""
         return f"[linkedin] Profile: {name}{email_str}"
-    # Post or other doc type
+    if doc.doc_type == "post":
+        ago = _time_ago(doc.timestamp)
+        likes = doc.metadata.get("like_count", 0)
+        comments = doc.metadata.get("comment_count", 0)
+        snippet = doc.content[:120].replace("\n", " ").strip() if doc.content else ""
+        stats = f"{likes} likes, {comments} comments"
+        line = f"[linkedin] Post ({ago}): {stats}"
+        if snippet:
+            line += f"\n  {snippet}"
+        return line
     return f"[linkedin] {doc.title}"
 
 
@@ -459,6 +489,111 @@ def _format_music_section(
         label = "Recently played" if source == "spotify" else "Library"
         lines.append(f"[{source}] {label}: {', '.join(tracks)}")
     return lines
+
+
+_IMPORTANCE_KEYWORDS = re.compile(
+    r"interview|offer|recruiter|hiring|deadline|urgent|asap|action\s*required"
+    r"|overdue|payment|invoice|contract|signed|approval|confirm|respond|reply"
+    r"|schedule|calendar\s*invite|meeting\s*request",
+    re.IGNORECASE,
+)
+
+_SKIP_SENDERS = re.compile(
+    r"noreply|no-reply|notifications?@|mailer-daemon|newsletters?@"
+    r"|marketing@|promo(tions)?@|updates?@|digest@|info@|support@"
+    r"|donotreply|automated@|notification@|news@",
+    re.IGNORECASE,
+)
+
+
+def _triage_email_threads(docs: List[Document]) -> List[Document]:
+    """Group Gmail docs by thread, detect reply status, and rank by importance.
+
+    Returns one document per thread (the latest inbound message), annotated
+    with metadata flags the formatter and LLM can use:
+    - ``_replied``: True if the user's SENT message is the latest in the thread
+    - ``_importance``: "high" | "normal" | "low"
+    - ``_thread_count``: total messages in the thread within the window
+    """
+    from collections import defaultdict
+
+    by_thread: Dict[str, List[Document]] = defaultdict(list)
+    no_thread: List[Document] = []
+
+    for doc in docs:
+        tid = doc.thread_id
+        if tid:
+            by_thread[tid].append(doc)
+        else:
+            no_thread.append(doc)
+
+    result: List[Document] = []
+
+    for thread_docs in by_thread.values():
+        thread_docs.sort(key=lambda d: d.timestamp)
+        latest = thread_docs[-1]
+        channel = latest.channel or ""
+        labels = latest.metadata.get("labels", [])
+
+        # Detect if user already replied: latest message is SENT
+        user_replied = channel == "SENT" or "SENT" in labels
+
+        # Find the latest INBOUND message to surface (skip if only sent)
+        inbound = [d for d in thread_docs if (d.channel or "") != "SENT" and "SENT" not in d.metadata.get("labels", [])]
+        representative = inbound[-1] if inbound else latest
+
+        # Importance scoring
+        subject = representative.title or ""
+        body = representative.content or ""
+        sender = representative.author or ""
+        combined = f"{subject} {body[:500]} {sender}"
+
+        if _SKIP_SENDERS.search(sender):
+            importance = "low"
+        elif _IMPORTANCE_KEYWORDS.search(combined):
+            importance = "high"
+        elif "UNREAD" in labels:
+            importance = "normal"
+        else:
+            importance = "normal"
+
+        # Annotate the representative doc with triage metadata
+        representative.metadata["_replied"] = user_replied
+        representative.metadata["_importance"] = importance
+        representative.metadata["_thread_count"] = len(thread_docs)
+
+        result.append(representative)
+
+    # Solo messages (no thread_id)
+    for doc in no_thread:
+        sender = doc.author or ""
+        subject = doc.title or ""
+        body = doc.content or ""
+        labels = doc.metadata.get("labels", [])
+        combined = f"{subject} {body[:500]} {sender}"
+
+        if _SKIP_SENDERS.search(sender):
+            importance = "low"
+        elif _IMPORTANCE_KEYWORDS.search(combined):
+            importance = "high"
+        else:
+            importance = "normal"
+
+        doc.metadata["_replied"] = False
+        doc.metadata["_importance"] = importance
+        doc.metadata["_thread_count"] = 1
+        result.append(doc)
+
+    # Sort: high importance first, then by timestamp descending
+    priority_order = {"high": 0, "normal": 1, "low": 2}
+    result.sort(
+        key=lambda d: (
+            priority_order.get(d.metadata.get("_importance", "normal"), 1),
+            -d.timestamp.timestamp() if d.timestamp else 0,
+        )
+    )
+
+    return result
 
 
 def _filter_unanswered_threads(docs: List[Document]) -> List[Document]:
@@ -553,7 +688,7 @@ class DigestCollectTool(BaseTool):
         hours_back: float = params.get("hours_back", 24)
         unacted_only: bool = bool(params.get("unacted_only", False))
         seen_ids: set = set(params.get("seen_ids", []))
-        since = datetime.now() - timedelta(hours=hours_back)
+        since = datetime.now(tz=timezone.utc) - timedelta(hours=hours_back)
 
         # Collect raw documents per source
         collected_docs: Dict[str, List[Document]] = {}
@@ -574,8 +709,9 @@ class DigestCollectTool(BaseTool):
                     )
                     continue
 
-                # Cap per-source to avoid overwhelming the LLM context
-                max_per_source = 15
+                # Cap per-source to avoid overwhelming the LLM context.
+                # Gmail gets a higher cap because thread deduplication reduces it.
+                max_per_source = 30 if source == "gmail" else 15
                 docs: List[Document] = []
 
                 sync_kwargs: Dict[str, Any] = {"since": since}
@@ -593,6 +729,10 @@ class DigestCollectTool(BaseTool):
 
                 if unacted_only and source == "gcalendar":
                     docs = _filter_pending_invites(docs)
+
+                # Always triage Gmail threads: detect replies, rank importance
+                if source == "gmail":
+                    docs = _triage_email_threads(docs)
 
                 collected_docs[source] = docs
             except Exception as exc:

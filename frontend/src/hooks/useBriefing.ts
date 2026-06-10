@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useAppStore } from '../lib/store';
-import { fetchDigest, generateDigest, synthesizeSpeech } from '../lib/api';
+import { fetchDigest, generateDigest, getDigestAudioUrl, synthesizeSpeech } from '../lib/api';
 import type { DigestData } from '../lib/api';
 
 function getGreeting(): string {
@@ -11,11 +11,17 @@ function getGreeting(): string {
   return 'Good evening, sir.';
 }
 
-/** Check if digest is stale (older than 12 hours). */
+/** Check if digest is stale (generated on a different calendar day or older than 6 hours). */
 function isStale(digest: DigestData): boolean {
   try {
-    const generated = new Date(digest.generated_at).getTime();
-    return Date.now() - generated > 12 * 60 * 60 * 1000;
+    const generated = new Date(digest.generated_at);
+    const now = new Date();
+    const sameDay =
+      generated.getFullYear() === now.getFullYear() &&
+      generated.getMonth() === now.getMonth() &&
+      generated.getDate() === now.getDate();
+    if (!sameDay) return true;
+    return now.getTime() - generated.getTime() > 6 * 60 * 60 * 1000;
   } catch {
     return true;
   }
@@ -28,8 +34,12 @@ export interface BriefingControls {
   interrupt: () => void;
   /** Re-fetch and re-play the briefing */
   refresh: () => void;
+  /** Play (or replay) the briefing audio on demand */
+  play: () => void;
   /** Whether TTS is currently playing */
   isSpeaking: boolean;
+  /** Whether pre-generated audio is available */
+  hasAudio: boolean;
 }
 
 export function useBriefing(): BriefingControls {
@@ -43,6 +53,8 @@ export function useBriefing(): BriefingControls {
   const playingRef = useRef(false);
   const mountedRef = useRef(true);
   const hasRunRef = useRef(false);
+  const hasAudioRef = useRef(false);
+  const digestTextRef = useRef<string | null>(null);
 
   // Clean up on unmount
   useEffect(() => {
@@ -55,11 +67,13 @@ export function useBriefing(): BriefingControls {
   const interrupt = useCallback(() => {
     if (currentAudioRef.current) {
       currentAudioRef.current.pause();
-      URL.revokeObjectURL(currentAudioRef.current.src);
+      if (currentAudioRef.current.src.startsWith('blob:')) {
+        URL.revokeObjectURL(currentAudioRef.current.src);
+      }
       currentAudioRef.current = null;
     }
     for (const a of audioQueueRef.current) {
-      URL.revokeObjectURL(a.src);
+      if (a.src.startsWith('blob:')) URL.revokeObjectURL(a.src);
     }
     audioQueueRef.current = [];
     playingRef.current = false;
@@ -80,18 +94,28 @@ export function useBriefing(): BriefingControls {
     const audio = audioQueueRef.current.shift()!;
     currentAudioRef.current = audio;
     audio.onended = () => {
-      URL.revokeObjectURL(audio.src);
+      if (audio.src.startsWith('blob:')) URL.revokeObjectURL(audio.src);
       currentAudioRef.current = null;
       playNextAudio();
     };
     audio.play().catch(() => playNextAudio());
   }, [setBriefingStatus]);
 
-  /** Split text into sentences and queue TTS for each. */
+  /** Play pre-generated digest audio from the backend. */
+  const playDigestAudio = useCallback(() => {
+    if (!mountedRef.current) return;
+    interrupt();
+    setBriefingStatus('speaking');
+    const audio = new Audio(getDigestAudioUrl());
+    audioQueueRef.current.push(audio);
+    playingRef.current = false; // let playNextAudio set it
+    playNextAudio();
+  }, [interrupt, playNextAudio, setBriefingStatus]);
+
+  /** Fall back to sentence-level TTS synthesis. */
   const speakText = useCallback(
     (text: string) => {
       setBriefingStatus('speaking');
-      // Split on sentence boundaries
       const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
       for (const sentence of sentences) {
         const clean = sentence
@@ -115,6 +139,15 @@ export function useBriefing(): BriefingControls {
     [playNextAudio, setBriefingStatus],
   );
 
+  /** Play the briefing: use pre-generated audio if available, else TTS. */
+  const play = useCallback(() => {
+    if (hasAudioRef.current) {
+      playDigestAudio();
+    } else if (digestTextRef.current) {
+      speakText(digestTextRef.current);
+    }
+  }, [playDigestAudio, speakText]);
+
   const loadBriefing = useCallback(async () => {
     setBriefingStatus('loading');
 
@@ -131,30 +164,38 @@ export function useBriefing(): BriefingControls {
     if (!digest) {
       const fallback = `${getGreeting()} Your daily briefing isn't available right now. What would you like to work on?`;
       setBriefingText(fallback);
+      digestTextRef.current = fallback;
+      hasAudioRef.current = false;
       return;
     }
 
+    hasAudioRef.current = !!digest.audio_available;
+
     const greeting = getGreeting();
     // Strip any existing greeting from the digest text to avoid duplication
-    // (the digest agent often prepends its own "Good morning, sir." etc.)
     const digestText = digest.text.replace(
       /^Good\s+(morning|afternoon|evening|night),?\s*(sir\.?)?\s*/i,
       '',
     );
     const fullText = `${greeting} Here's your situation.\n\n${digestText}`;
     setBriefingText(fullText);
+    digestTextRef.current = fullText;
 
-    // Auto-play TTS only once per session
+    // Auto-play only once per session
     const today = new Date().toDateString();
     const alreadyPlayed = sessionStorage.getItem(SESSION_KEY) === today;
     if (speechEnabled && !alreadyPlayed) {
       sessionStorage.setItem(SESSION_KEY, today);
-      // Small delay so the text renders first
       setTimeout(() => {
-        if (mountedRef.current) speakText(fullText);
+        if (!mountedRef.current) return;
+        if (hasAudioRef.current) {
+          playDigestAudio();
+        } else {
+          speakText(fullText);
+        }
       }, 500);
     }
-  }, [speechEnabled, setBriefingStatus, setBriefingText, speakText]);
+  }, [speechEnabled, setBriefingStatus, setBriefingText, speakText, playDigestAudio]);
 
   // Run once on mount
   useEffect(() => {
@@ -166,6 +207,8 @@ export function useBriefing(): BriefingControls {
   return {
     interrupt,
     refresh: loadBriefing,
+    play,
     isSpeaking: playingRef.current,
+    hasAudio: hasAudioRef.current,
   };
 }
