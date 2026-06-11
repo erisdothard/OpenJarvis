@@ -10,7 +10,7 @@ import {
   approveAction,
   denyAction,
   synthesizeSpeech,
-  getBase,
+
 } from '../lib/api';
 import { listConnectors } from '../lib/connectors-api';
 import { streamChat, streamResearch } from '../lib/sse';
@@ -425,13 +425,7 @@ export function CommandCenter() {
         tokens_per_sec: usage?.completion_tokens ? usage.completion_tokens / (totalMs / 1000) : undefined,
         complexity_score: complexity?.score, complexity_tier: complexity?.tier, suggested_max_tokens: complexity?.suggested_max_tokens,
       };
-      let audioMeta: { url: string } | undefined;
-      try {
-        const digestRes = await fetch(`${getBase()}/api/digest`);
-        if (digestRes.ok) { const digest = await digestRes.json(); if (digest.audio_available) audioMeta = { url: `${getBase()}/api/digest/audio` }; }
-      } catch {}
-
-      updateLastAssistant(convId, accumulatedContent, toolCalls.length > 0 ? toolCalls : undefined, usage, telemetry, audioMeta);
+      updateLastAssistant(convId, accumulatedContent, toolCalls.length > 0 ? toolCalls : undefined, usage, telemetry);
       if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
       resetStream();
       abortRef.current = null;
