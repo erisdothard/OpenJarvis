@@ -32,6 +32,7 @@ logger = logging.getLogger("openjarvis.server")
 
 def _get_registered_tools_openai() -> List[Dict[str, Any]]:
     """Convert all ToolRegistry entries to OpenAI function-calling format."""
+    import openjarvis.tools  # noqa: F401  # trigger @ToolRegistry.register() decorators
     from openjarvis.core.registry import ToolRegistry
 
     tools: List[Dict[str, Any]] = []

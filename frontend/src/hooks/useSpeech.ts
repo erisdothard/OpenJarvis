@@ -3,10 +3,11 @@ import { transcribeAudio, fetchSpeechHealth } from '../lib/api';
 
 export type SpeechState = 'idle' | 'recording' | 'transcribing';
 
-const SILENCE_THRESHOLD = 15; // RMS level (0-255) below which we consider silence
-const BARGE_IN_THRESHOLD = 30; // Higher threshold to avoid speaker bleed triggering barge-in
-const SILENCE_DURATION = 1500; // ms of continuous silence before auto-stop
+const SILENCE_THRESHOLD = 40; // RMS level below which we consider silence (raised for ambient noise)
+const BARGE_IN_THRESHOLD = 45; // threshold to detect user speaking over TTS
+const SILENCE_DURATION = 3000; // ms of silence before auto-stop (3 seconds)
 const MIN_RECORDING_MS = 500; // don't auto-stop before this
+const MAX_RECORDING_MS = 15000; // safety: force-stop after 15s
 
 interface UseSpeechOptions {
   onTranscribed?: (text: string) => void;
@@ -100,8 +101,8 @@ export function useSpeech(options?: UseSpeechOptions) {
 
             if (rms > BARGE_IN_THRESHOLD) {
               speechFrames++;
-              // Require 3 consecutive frames of speech to avoid false triggers
-              if (speechFrames >= 3) {
+              // Require 2 consecutive frames of speech (~33ms at 60fps)
+              if (speechFrames >= 2) {
                 stopBargeInMonitor();
                 onBargeIn();
                 return;
@@ -206,6 +207,14 @@ export function useSpeech(options?: UseSpeechOptions) {
 
         const now = Date.now();
         const elapsed = now - recordingStartRef.current;
+
+        // Safety: force-stop if recording runs too long
+        if (elapsed > MAX_RECORDING_MS) {
+          doStop()
+            .then((text) => { if (text && onTranscribedRef.current) onTranscribedRef.current(text); })
+            .catch(() => {});
+          return;
+        }
 
         if (rms < SILENCE_THRESHOLD) {
           if (silentSince === null) silentSince = now;

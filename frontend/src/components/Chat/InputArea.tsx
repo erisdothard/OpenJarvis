@@ -116,11 +116,7 @@ export function InputArea() {
       playingRef.current = false;
       currentAudioRef.current = null;
       stopBargeInRef.current();
-      // Auto-listen: start recording after Jarvis finishes speaking
-      if (voiceInitiatedRef.current && speechEnabled) {
-        voiceInitiatedRef.current = false;
-        startRecordingRef.current?.().catch(() => {});
-      }
+      voiceInitiatedRef.current = false;
       return;
     }
     playingRef.current = true;
@@ -135,10 +131,8 @@ export function InputArea() {
     // Start barge-in monitor so user can interrupt by speaking
     startBargeInRef.current(() => {
       interruptAudioRef.current();
-      voiceInitiatedRef.current = true;
-      startRecordingRef.current?.().catch(() => {});
     });
-  }, [speechEnabled]);
+  }, []);
 
   // Interrupt Jarvis: stop all queued audio immediately
   const interruptAudio = useCallback(() => {
@@ -174,8 +168,9 @@ export function InputArea() {
   }, [playNextAudio]);
 
   const handleVoiceTranscribed = useCallback((text: string) => {
-    if (text) {
-      setInput(text);
+    const clean = text?.trim();
+    if (clean && clean.length > 1) {
+      setInput(clean);
       pendingVoiceRef.current = true;
     }
   }, []);
@@ -215,24 +210,28 @@ export function InputArea() {
     : undefined;
 
   const handleMicClick = useCallback(async () => {
-    // Interrupt Jarvis if she's speaking
+    if (!speechAvailable) {
+      toast.error('Speech backend not available — check server config');
+      return;
+    }
+    // Interrupt Jarvis if he's speaking
     interruptAudio();
 
     if (speechState === 'recording') {
       try {
         const text = await stopRecording();
-        if (text) {
-          setInput(text);
+        if (text && text.trim().length > 1) {
+          setInput(text.trim());
           pendingVoiceRef.current = true;
         }
       } catch {
-        // Error is captured in useSpeech
+        toast.error('Transcription failed');
       }
     } else {
       voiceInitiatedRef.current = true;
       await startRecording();
     }
-  }, [speechState, startRecording, stopRecording, interruptAudio]);
+  }, [speechState, speechAvailable, startRecording, stopRecording, interruptAudio]);
 
   useEffect(() => {
     const el = textareaRef.current;

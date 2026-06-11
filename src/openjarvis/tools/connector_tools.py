@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
@@ -149,137 +150,6 @@ class GmailListUnread(BaseTool):
 
 
 # ---------------------------------------------------------------------------
-# Calendar tools
-# ---------------------------------------------------------------------------
-
-
-@ToolRegistry.register("calendar_get_events_today")
-class CalendarGetEventsToday(BaseTool):
-    tool_id = "calendar_get_events_today"
-
-    @property
-    def spec(self) -> ToolSpec:
-        return ToolSpec(
-            name="calendar_get_events_today",
-            description="Retrieve all Google Calendar events scheduled for today.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "calendar_id": {
-                        "type": "string",
-                        "description": "Calendar ID (defaults to 'primary')",
-                        "default": "primary",
-                    },
-                },
-                "required": [],
-            },
-            category="productivity",
-        )
-
-    def execute(self, **params: Any) -> ToolResult:
-        connector_cls = ConnectorRegistry.get("gcalendar")
-        if connector_cls is None:
-            return _err(self.tool_id, "Google Calendar connector not available")
-
-        connector = connector_cls()
-        if not connector.is_connected():
-            return _err(self.tool_id, "Google Calendar not connected — run OAuth setup first")
-
-        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        docs = []
-        for d in connector.sync(since=today_start):
-            if d.timestamp and d.timestamp.date() == today_start.date():
-                docs.append(d)
-
-        return _ok(self.tool_id, _docs_to_json(docs, 50))
-
-
-@ToolRegistry.register("calendar_search_events")
-class CalendarSearchEvents(BaseTool):
-    tool_id = "calendar_search_events"
-
-    @property
-    def spec(self) -> ToolSpec:
-        return ToolSpec(
-            name="calendar_search_events",
-            description="Search Google Calendar events by keyword.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search term to match against event fields",
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Maximum events to return",
-                        "default": 20,
-                    },
-                },
-                "required": ["query"],
-            },
-            category="productivity",
-        )
-
-    def execute(self, **params: Any) -> ToolResult:
-        query = params.get("query", "").lower()
-        max_results = params.get("max_results", 20)
-
-        connector_cls = ConnectorRegistry.get("gcalendar")
-        if connector_cls is None:
-            return _err(self.tool_id, "Google Calendar connector not available")
-
-        connector = connector_cls()
-        if not connector.is_connected():
-            return _err(self.tool_id, "Google Calendar not connected — run OAuth setup first")
-
-        docs = []
-        for d in connector.sync(since=datetime.now() - timedelta(days=30)):
-            title = (d.title or "").lower()
-            content = (d.content or "").lower()
-            if query in title or query in content:
-                docs.append(d)
-                if len(docs) >= max_results:
-                    break
-
-        return _ok(self.tool_id, _docs_to_json(docs, max_results))
-
-
-@ToolRegistry.register("calendar_next_meeting")
-class CalendarNextMeeting(BaseTool):
-    tool_id = "calendar_next_meeting"
-
-    @property
-    def spec(self) -> ToolSpec:
-        return ToolSpec(
-            name="calendar_next_meeting",
-            description="Find the next upcoming meeting on Google Calendar.",
-            parameters={
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-            category="productivity",
-        )
-
-    def execute(self, **params: Any) -> ToolResult:
-        connector_cls = ConnectorRegistry.get("gcalendar")
-        if connector_cls is None:
-            return _err(self.tool_id, "Google Calendar connector not available")
-
-        connector = connector_cls()
-        if not connector.is_connected():
-            return _err(self.tool_id, "Google Calendar not connected — run OAuth setup first")
-
-        now = datetime.now()
-        for d in connector.sync(since=now):
-            if d.timestamp and d.timestamp > now:
-                return _ok(self.tool_id, _docs_to_json([d], 1))
-
-        return _ok(self.tool_id, "No upcoming meetings found.")
-
-
-# ---------------------------------------------------------------------------
 # Apple Calendar tools
 # ---------------------------------------------------------------------------
 
@@ -366,6 +236,411 @@ class AppleCalendarUpcoming(BaseTool):
             return _ok(self.tool_id, f"No events in the next {days} days.")
 
         return _ok(self.tool_id, json.dumps(events, indent=2, default=str))
+
+
+# ---------------------------------------------------------------------------
+# Apple Calendar — create event
+# ---------------------------------------------------------------------------
+
+
+@ToolRegistry.register("apple_calendar_create_event")
+class AppleCalendarCreateEvent(BaseTool):
+    tool_id = "apple_calendar_create_event"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="apple_calendar_create_event",
+            description=(
+                "Create a new event on Apple Calendar. "
+                "Provide a title, start/end times (ISO 8601 or natural language), "
+                "and optionally a calendar name, location, and notes."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Event title / summary",
+                    },
+                    "start": {
+                        "type": "string",
+                        "description": "Start date/time in ISO 8601 format (e.g. 2026-06-15T09:00:00)",
+                    },
+                    "end": {
+                        "type": "string",
+                        "description": "End date/time in ISO 8601 format (e.g. 2026-06-15T10:00:00)",
+                    },
+                    "calendar": {
+                        "type": "string",
+                        "description": "Calendar name (e.g. Home, Work). Defaults to Home.",
+                        "default": "Home",
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "Event location",
+                        "default": "",
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Event notes / description",
+                        "default": "",
+                    },
+                    "all_day": {
+                        "type": "boolean",
+                        "description": "Whether this is an all-day event",
+                        "default": False,
+                    },
+                },
+                "required": ["summary", "start", "end"],
+            },
+            category="productivity",
+            requires_confirmation=True,
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        from openjarvis.connectors.apple_calendar import _applescript_create_event
+
+        summary = params.get("summary", "")
+        start_str = params.get("start", "")
+        end_str = params.get("end", "")
+        calendar_name = params.get("calendar", "Home")
+        location = params.get("location", "")
+        notes = params.get("notes", "")
+        all_day = params.get("all_day", False)
+
+        if not summary or not start_str or not end_str:
+            return _err(self.tool_id, "summary, start, and end are required")
+
+        try:
+            start_dt = datetime.fromisoformat(start_str)
+        except ValueError:
+            return _err(self.tool_id, f"Invalid start date format: {start_str}")
+        try:
+            end_dt = datetime.fromisoformat(end_str)
+        except ValueError:
+            return _err(self.tool_id, f"Invalid end date format: {end_str}")
+
+        result = _applescript_create_event(
+            summary=summary,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            calendar_name=calendar_name,
+            location=location,
+            notes=notes,
+            all_day=all_day,
+        )
+
+        if not result.get("success"):
+            return _err(self.tool_id, result.get("error", "Failed to create event"))
+
+        return _ok(self.tool_id, json.dumps(result, indent=2, default=str))
+
+
+# ---------------------------------------------------------------------------
+# iMessage — send
+# ---------------------------------------------------------------------------
+
+
+@ToolRegistry.register("send_imessage")
+class SendIMessage(BaseTool):
+    tool_id = "send_imessage"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="send_imessage",
+            description=(
+                "Send an iMessage to a contact. Provide the recipient's phone "
+                "number (E.164 format, e.g. +15551234567) or iMessage email, "
+                "and the message text."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "recipient": {
+                        "type": "string",
+                        "description": "Phone number (E.164) or email of the recipient",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "The message text to send",
+                    },
+                },
+                "required": ["recipient", "message"],
+            },
+            category="communication",
+            requires_confirmation=True,
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        from openjarvis.channels.imessage_daemon import send_imessage
+
+        recipient = params.get("recipient", "")
+        message = params.get("message", "")
+
+        if not recipient or not message:
+            return _err(self.tool_id, "Both recipient and message are required")
+
+        success = send_imessage(recipient, message)
+        if not success:
+            return _err(self.tool_id, f"Failed to send iMessage to {recipient}")
+
+        return _ok(
+            self.tool_id,
+            json.dumps({"sent": True, "recipient": recipient, "message": message}),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Apple Reminders — list and create
+# ---------------------------------------------------------------------------
+
+
+def _run_applescript(script: str, *, timeout: float = 60.0) -> subprocess.CompletedProcess:
+    """Run AppleScript via a temp file (avoids subprocess -e timeouts)."""
+    import tempfile
+    import os
+
+    fd, path = tempfile.mkstemp(suffix=".scpt")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(script)
+        return subprocess.run(
+            ["osascript", path],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _applescript_list_reminders(
+    list_name: str = "Reminders", include_completed: bool = False
+) -> List[Dict[str, Any]]:
+    """Read reminders from a Reminders.app list via AppleScript."""
+    escaped_list = list_name.replace("\\", "\\\\").replace('"', '\\"')
+    completed_filter = "" if include_completed else " whose completed is false"
+    script = f'''tell application "Reminders"
+    set output to ""
+    set rList to every reminder of list "{escaped_list}"{completed_filter}
+    repeat with r in rList
+        set rName to name of r
+        set rDue to "none"
+        try
+            set rDue to due date of r as string
+        end try
+        set rBody to ""
+        try
+            set rBody to body of r
+        end try
+        set output to output & rName & "||" & rDue & "||" & rBody & return
+    end repeat
+    return output
+end tell'''
+
+    try:
+        result = _run_applescript(script)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+
+    if result.returncode != 0:
+        logger.error("AppleScript reminders read failed: %s", result.stderr.strip())
+        return []
+
+    reminders: List[Dict[str, Any]] = []
+    for line in result.stdout.strip().split("\n"):
+        parts = line.split("||")
+        if len(parts) < 2:
+            continue
+        reminders.append({
+            "name": parts[0].strip(),
+            "due_date": parts[1].strip() if parts[1].strip() != "none" else None,
+            "body": parts[2].strip() if len(parts) > 2 else "",
+        })
+    return reminders
+
+
+def _applescript_create_reminder(
+    *,
+    name: str,
+    list_name: str = "Reminders",
+    body: str = "",
+    due_date: str = "",
+    priority: int = 0,
+) -> Dict[str, Any]:
+    """Create a reminder in Reminders.app via AppleScript."""
+    escaped_name = name.replace("\\", "\\\\").replace('"', '\\"')
+    escaped_list = list_name.replace("\\", "\\\\").replace('"', '\\"')
+
+    props = f'name:"{escaped_name}"'
+    if body:
+        escaped_body = body.replace("\\", "\\\\").replace('"', '\\"')
+        props += f', body:"{escaped_body}"'
+    if priority:
+        props += f", priority:{priority}"
+
+    # Ensure Reminders.app is running — AppleScript 'activate' can fail
+    # with -600 on macOS Sequoia+; 'open -a' is reliable.
+    import time as _time
+    subprocess.run(["open", "-a", "Reminders"], check=False, timeout=5)
+    _time.sleep(1)
+
+    lines = [
+        'tell application "Reminders"',
+        f'  tell list "{escaped_list}"',
+    ]
+    if due_date:
+        lines.append(f'    set dueDate to date "{due_date}"')
+        lines.append(f"    set newReminder to make new reminder with properties {{{props}, due date:dueDate}}")
+    else:
+        lines.append(f"    set newReminder to make new reminder with properties {{{props}}}")
+    lines.extend([
+        "    return id of newReminder",
+        "  end tell",
+        "end tell",
+    ])
+    script = "\n".join(lines)
+
+    try:
+        result = _run_applescript(script)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return {"success": False, "error": "osascript not available"}
+
+    if result.returncode != 0:
+        return {"success": False, "error": result.stderr.strip()}
+
+    return {
+        "success": True,
+        "id": result.stdout.strip(),
+        "name": name,
+        "list": list_name,
+        "due_date": due_date or None,
+    }
+
+
+@ToolRegistry.register("apple_reminders_list")
+class AppleRemindersList(BaseTool):
+    tool_id = "apple_reminders_list"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="apple_reminders_list",
+            description=(
+                "List reminders from Apple Reminders. "
+                "By default shows incomplete reminders from the 'Reminders' list."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "list_name": {
+                        "type": "string",
+                        "description": "Reminders list name",
+                        "default": "Reminders",
+                    },
+                    "include_completed": {
+                        "type": "boolean",
+                        "description": "Whether to include completed reminders",
+                        "default": False,
+                    },
+                },
+                "required": [],
+            },
+            category="productivity",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        list_name = params.get("list_name", "Reminders")
+        include_completed = params.get("include_completed", False)
+
+        reminders = _applescript_list_reminders(list_name, include_completed)
+        if not reminders:
+            return _ok(self.tool_id, "No reminders found.")
+
+        return _ok(self.tool_id, json.dumps(reminders, indent=2, default=str))
+
+
+@ToolRegistry.register("apple_reminders_create")
+class AppleRemindersCreate(BaseTool):
+    tool_id = "apple_reminders_create"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="apple_reminders_create",
+            description=(
+                "Create a new reminder in Apple Reminders. "
+                "Provide a name and optionally a due date, notes, "
+                "list name, and priority (0=none, 1=high, 5=medium, 9=low)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Reminder title",
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "Due date in ISO 8601 format (e.g. 2026-06-15T09:00:00)",
+                        "default": "",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Additional notes for the reminder",
+                        "default": "",
+                    },
+                    "list_name": {
+                        "type": "string",
+                        "description": "Reminders list name",
+                        "default": "Reminders",
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "description": "Priority: 0=none, 1=high, 5=medium, 9=low",
+                        "default": 0,
+                    },
+                },
+                "required": ["name"],
+            },
+            category="productivity",
+            requires_confirmation=True,
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        name = params.get("name", "")
+        if not name:
+            return _err(self.tool_id, "Reminder name is required")
+
+        due_date_str = params.get("due_date", "")
+        body = params.get("body", "")
+        list_name = params.get("list_name", "Reminders")
+        priority = params.get("priority", 0)
+
+        # Convert ISO 8601 to AppleScript date format
+        applescript_due = ""
+        if due_date_str:
+            try:
+                dt = datetime.fromisoformat(due_date_str)
+                applescript_due = dt.strftime("%B %d, %Y at %I:%M:%S %p")
+            except ValueError:
+                return _err(self.tool_id, f"Invalid due_date format: {due_date_str}")
+
+        result = _applescript_create_reminder(
+            name=name,
+            list_name=list_name,
+            body=body,
+            due_date=applescript_due,
+            priority=priority,
+        )
+
+        if not result.get("success"):
+            return _err(self.tool_id, result.get("error", "Failed to create reminder"))
+
+        return _ok(self.tool_id, json.dumps(result, indent=2, default=str))
 
 
 # ---------------------------------------------------------------------------

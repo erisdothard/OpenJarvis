@@ -16,6 +16,7 @@ epoch of 2001-01-01 00:00:00 UTC.
 from __future__ import annotations
 
 import logging
+import subprocess
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -53,6 +54,132 @@ def _datetime_to_apple_ts(dt: datetime) -> float:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return (dt - _APPLE_EPOCH).total_seconds()
+
+
+# ---------------------------------------------------------------------------
+# Helpers (used by tools in connector_tools.py)
+# ---------------------------------------------------------------------------
+
+
+def _run_applescript(script: str, *, timeout: float = 60.0) -> subprocess.CompletedProcess:
+    """Run an AppleScript via a temp file to avoid subprocess -e timeouts."""
+    import tempfile
+    import os
+
+    fd, path = tempfile.mkstemp(suffix=".scpt")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(script)
+        return subprocess.run(
+            ["osascript", path],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _applescript_get_events(
+    start_dt: datetime, end_dt: datetime
+) -> List[Dict[str, Any]]:
+    """Read calendar events between two datetimes using the SQLite connector.
+
+    Falls back to the fast SQLite approach rather than slow AppleScript
+    iteration over all calendars (which times out on holiday calendars).
+
+    Returns a list of dicts with keys: summary, start, end, calendar,
+    location, all_day, notes.
+    """
+    connector = AppleCalendarConnector()
+    if not connector.is_connected():
+        logger.warning("Apple Calendar SQLite not accessible")
+        return []
+
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=timezone.utc)
+    if end_dt.tzinfo is None:
+        end_dt = end_dt.replace(tzinfo=timezone.utc)
+
+    events: List[Dict[str, Any]] = []
+    for doc in connector.sync(since=start_dt):
+        if doc.timestamp and doc.timestamp > end_dt:
+            continue
+        meta = doc.metadata or {}
+        events.append({
+            "summary": doc.title or "",
+            "start": meta.get("start", ""),
+            "end": meta.get("end", ""),
+            "calendar": meta.get("calendar", ""),
+            "location": meta.get("location", ""),
+            "all_day": meta.get("all_day", False),
+            "notes": (doc.content or "").split("Notes: ")[-1] if "Notes: " in (doc.content or "") else "",
+        })
+    return events
+
+
+def _applescript_create_event(
+    *,
+    summary: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    calendar_name: str = "Home",
+    location: str = "",
+    notes: str = "",
+    all_day: bool = False,
+) -> Dict[str, Any]:
+    """Create a calendar event via AppleScript.
+
+    Returns dict with uid on success, or error info on failure.
+    """
+    escaped_summary = summary.replace("\\", "\\\\").replace('"', '\\"')
+    start_str = start_dt.strftime("%B %d, %Y at %I:%M:%S %p")
+    end_str = end_dt.strftime("%B %d, %Y at %I:%M:%S %p")
+
+    props = f'summary:"{escaped_summary}", start date:(date "{start_str}"), end date:(date "{end_str}")'
+    if all_day:
+        props += ", allday event:true"
+    if location:
+        escaped_loc = location.replace("\\", "\\\\").replace('"', '\\"')
+        props += f', location:"{escaped_loc}"'
+    if notes:
+        escaped_notes = notes.replace("\\", "\\\\").replace('"', '\\"')
+        props += f', description:"{escaped_notes}"'
+
+    escaped_cal = calendar_name.replace("\\", "\\\\").replace('"', '\\"')
+
+    # Ensure Calendar.app is running — AppleScript 'launch' / 'activate'
+    # fails with -600 on macOS Sequoia+; 'open -a' is reliable.
+    subprocess.run(["open", "-a", "Calendar"], check=False, timeout=5)
+    import time as _time
+    _time.sleep(1)
+
+    script = (
+        'tell application "Calendar"\n'
+        f'  tell calendar "{escaped_cal}"\n'
+        f"    set newEvent to make new event with properties {{{props}}}\n"
+        "    return uid of newEvent\n"
+        "  end tell\n"
+        "end tell"
+    )
+
+    try:
+        result = _run_applescript(script)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return {"success": False, "error": "osascript not available"}
+
+    if result.returncode != 0:
+        return {"success": False, "error": result.stderr.strip()}
+
+    return {
+        "success": True,
+        "uid": result.stdout.strip(),
+        "summary": summary,
+        "start": start_str,
+        "end": end_str,
+        "calendar": calendar_name,
+    }
 
 
 @ConnectorRegistry.register("apple_calendar")

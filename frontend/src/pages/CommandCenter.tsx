@@ -1,37 +1,32 @@
-import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router';
-import {
-  ArrowRight,
-  CheckCircle,
-  ChevronDown,
-  ChevronUp,
-  XCircle,
-  MessageSquare,
-  Mail,
-  Play,
-  Database,
-  Inbox,
-  Compass,
-  Search,
-  Sun,
-  User,
-  Volume2,
-  VolumeX,
-  RefreshCw,
-  Loader2,
-} from 'lucide-react';
-import { useAppStore } from '../lib/store';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Send, Square, Play, VolumeX, RefreshCw, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
+import { useAppStore, generateId } from '../lib/store';
 import {
   fetchManagedAgents,
   fetchPendingApprovals,
   fetchServerInfo,
+  fetchSavings,
   approveAction,
   denyAction,
+  synthesizeSpeech,
+  getBase,
 } from '../lib/api';
 import { listConnectors } from '../lib/connectors-api';
+import { streamChat, streamResearch } from '../lib/sse';
 import { useBriefing } from '../hooks/useBriefing';
+import { useSpeech } from '../hooks/useSpeech';
+import { useAlwaysOnVoice } from '../hooks/useAlwaysOnVoice';
+import { JarvisOrb } from '../components/JarvisOrb/JarvisOrb';
 import type { ManagedAgent, PendingApproval } from '../lib/api';
-import type { ConnectorInfo } from '../types/connectors';
+import type {
+  ChatMessage,
+  MessageTelemetry,
+  ResearchSearchTrace,
+  ResearchSource,
+  TokenUsage,
+  ToolCallInfo,
+} from '../types';
 
 /* ── helpers ── */
 
@@ -45,66 +40,86 @@ function timeAgo(epoch: number): string {
   return `${Math.floor(h / 24)}d`;
 }
 
-const TIER_COLORS: Record<string, string> = {
-  trivial: 'var(--color-text-secondary)',
-  low: '#00e5ff',
-  medium: 'var(--color-warning)',
-  high: 'var(--color-error)',
-};
-
-function agentStatus(agent: ManagedAgent) {
-  const map: Record<string, { color: string; label: string }> = {
-    idle: { color: '#6b7280', label: 'Idle' },
-    running: { color: '#00ffcc', label: 'Running' },
-    paused: { color: '#ffcc00', label: 'Paused' },
-    error: { color: '#ff0055', label: 'Error' },
-    needs_attention: { color: '#ffcc00', label: 'Attention' },
-    stalled: { color: '#ffcc00', label: 'Stalled' },
-    budget_exceeded: { color: '#ff0055', label: 'Budget' },
-    archived: { color: '#4b5563', label: 'Archived' },
-  };
-  return map[agent.status] || map.idle;
+function agentDotClass(status: string): string {
+  switch (status) {
+    case 'running': return 'pt-dot-run';
+    case 'error':
+    case 'budget_exceeded': return 'pt-dot-error';
+    case 'paused':
+    case 'needs_attention':
+    case 'stalled': return 'pt-dot-warn';
+    default: return 'pt-dot-idle';
+  }
 }
 
-const AGENT_ICONS = [Inbox, Compass, Search, Sun, User, Database, Mail, Play];
-
-const ACTION_CARDS = [
-  { title: 'Ask Jarvis', sub: 'Voice or text', id: 'XTS-001', category: 'COMPOSE', icon: MessageSquare, color: '#00e5ff', path: '/chat' },
-  { title: 'Check Email', sub: 'Latest messages', id: 'MP.0884', category: 'INCOMING', icon: Mail, color: '#00ff87', path: '/chat' },
-  { title: 'Run Agent', sub: '', id: 'T9Y.SUR', category: 'SYSTEM', icon: Play, color: '#ff6d00', path: '/agents' },
-  { title: 'Data Sources', sub: '', id: '1.0-89592', category: 'PROCESS', icon: Database, color: '#8c00ff', path: '/data-sources' },
-];
-
-const TICKER_TEXT = '☆ Conceptual Artwork   ⚙ Systems Group   🌐 Metro Worldwide   ▮▮▮▮▮▮   ✵ Data Streams   ▮▮▮▮▮▮   ';
-
-/* ── Shared glass card style ── */
-const GLASS = 'rounded-2xl border border-white/[0.1] bg-black/40 backdrop-blur-sm shadow-[0_4px_20px_rgba(0,0,0,0.4)]';
-const GLASS_INNER = 'rounded-xl border border-white/[0.06] bg-black/25';
+function agentLabel(status: string): string {
+  const map: Record<string, string> = {
+    idle: 'idle', running: 'running', paused: 'paused',
+    error: 'error', needs_attention: 'attention', stalled: 'stalled',
+    budget_exceeded: 'budget', archived: 'archived',
+  };
+  return map[status] || 'idle';
+}
 
 /* ── Main ── */
 
 export function CommandCenter() {
-  const navigate = useNavigate();
   const serverInfo = useAppStore((s) => s.serverInfo);
   const isStreaming = useAppStore((s) => s.streamState.isStreaming);
+  const streamState = useAppStore((s) => s.streamState);
   const briefing = useAppStore((s) => s.briefing);
+  // const savings = useAppStore((s) => s.savings);
+  const messages = useAppStore((s) => s.messages);
+  const activeId = useAppStore((s) => s.activeId);
+  const selectedModel = useAppStore((s) => s.selectedModel);
+  const speechEnabled = useAppStore((s) => s.settings.speechEnabled);
+  const voiceAlwaysOn = useAppStore((s) => s.settings.voiceAlwaysOn);
+  const maxTokens = useAppStore((s) => s.settings.maxTokens);
+  const temperature = useAppStore((s) => s.settings.temperature);
+  const jarvisState = useAppStore((s) => s.jarvisState);
+  const audioLevel = useAppStore((s) => s.audioLevel);
+  const setJarvisState = useAppStore((s) => s.setJarvisState);
+  const setAudioLevel = useAppStore((s) => s.setAudioLevel);
+  const updateSettings = useAppStore((s) => s.updateSettings);
+  const createConversation = useAppStore((s) => s.createConversation);
+  const addMessage = useAppStore((s) => s.addMessage);
+  const updateLastAssistant = useAppStore((s) => s.updateLastAssistant);
+  const setStreamState = useAppStore((s) => s.setStreamState);
+  const resetStream = useAppStore((s) => s.resetStream);
+  const setCommandPaletteOpen = useAppStore((s) => s.setCommandPaletteOpen);
 
   const [agents, setAgents] = useState<ManagedAgent[]>([]);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
-  const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [processing, setProcessing] = useState<Record<string, boolean>>({});
+
+  const [input, setInput] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastResponseRef = useRef('');
+
+  // Audio refs for TTS
+  const audioQueueRef = useRef<HTMLAudioElement[]>([]);
+  const playingRef = useRef(false);
+  const sentenceBufferRef = useRef('');
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const startRecordingRef = useRef<(() => Promise<void>) | undefined>(undefined);
+  const interruptAudioRef = useRef<() => void>(() => {});
+  const stopBargeInRef = useRef<() => void>(() => {});
+  const startBargeInRef = useRef<(cb: () => void) => void>(() => {});
+  const voiceInitiatedRef = useRef(false);
+  const pendingVoiceRef = useRef(false);
 
   const { interrupt, refresh: refreshBriefing, play: playBriefing } = useBriefing();
 
+  // ── Data polling ──
   const refresh = useCallback(async () => {
-    const [a, ap, c] = await Promise.allSettled([
+    const [a, ap] = await Promise.allSettled([
       fetchManagedAgents(),
       fetchPendingApprovals(),
-      listConnectors(),
     ]);
     if (a.status === 'fulfilled') setAgents(a.value);
     if (ap.status === 'fulfilled') setApprovals(ap.value);
-    if (c.status === 'fulfilled') setConnectors(c.value);
   }, []);
 
   useEffect(() => {
@@ -114,6 +129,7 @@ export function CommandCenter() {
     return () => clearInterval(id);
   }, [refresh]);
 
+  // ── Approval handlers ──
   const handleApprove = async (id: string) => {
     setProcessing((p) => ({ ...p, [id]: true }));
     try { await approveAction(id); setApprovals((prev) => prev.filter((a) => a.id !== id)); }
@@ -125,392 +141,579 @@ export function CommandCenter() {
     finally { setProcessing((p) => ({ ...p, [id]: false })); }
   };
 
+  // Audio output level analysis ref
+  const ttsAnalyserRef = useRef<{ ctx: AudioContext; analyser: AnalyserNode; raf: number } | null>(null);
+
+  const stopTTSAnalyser = useCallback(() => {
+    if (ttsAnalyserRef.current) {
+      cancelAnimationFrame(ttsAnalyserRef.current.raf);
+      ttsAnalyserRef.current.ctx.close().catch(() => {});
+      ttsAnalyserRef.current = null;
+    }
+  }, []);
+
+  // ── TTS plumbing ──
+  const playNextAudio = useCallback(() => {
+    if (audioQueueRef.current.length === 0) {
+      playingRef.current = false;
+      currentAudioRef.current = null;
+      stopTTSAnalyser();
+      setJarvisState(voiceAlwaysOn ? 'listening' : 'idle');
+      setAudioLevel(0);
+      stopBargeInRef.current();
+      voiceInitiatedRef.current = false;
+      return;
+    }
+    playingRef.current = true;
+    setJarvisState('speaking');
+    const audio = audioQueueRef.current.shift()!;
+    currentAudioRef.current = audio;
+    audio.onended = () => {
+      URL.revokeObjectURL(audio.src);
+      currentAudioRef.current = null;
+      stopTTSAnalyser();
+      playNextAudio();
+    };
+    audio.play().then(() => {
+      // Extract audio levels from TTS output for orb reactivity
+      try {
+        const ctx = new AudioContext();
+        const source = ctx.createMediaElementSource(audio);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        analyser.connect(ctx.destination);
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        const tick = () => {
+          if (!playingRef.current) return;
+          analyser.getByteFrequencyData(data);
+          const rms = Math.sqrt(data.reduce((s, v) => s + v * v, 0) / data.length);
+          setAudioLevel(Math.min(rms / 80, 1));
+          ttsAnalyserRef.current = { ctx, analyser, raf: requestAnimationFrame(tick) };
+        };
+        ttsAnalyserRef.current = { ctx, analyser, raf: requestAnimationFrame(tick) };
+      } catch {
+        // AudioContext not available — orb won't react to output, but TTS still plays
+      }
+    }).catch(() => playNextAudio());
+    if (!voiceAlwaysOn) {
+      startBargeInRef.current(() => {
+        interruptAudioRef.current();
+      });
+    }
+  }, [voiceAlwaysOn, setJarvisState, setAudioLevel, stopTTSAnalyser]);
+
+  const interruptAudio = useCallback(() => {
+    stopBargeInRef.current();
+    stopTTSAnalyser();
+    if (currentAudioRef.current) { currentAudioRef.current.pause(); URL.revokeObjectURL(currentAudioRef.current.src); currentAudioRef.current = null; }
+    for (const a of audioQueueRef.current) URL.revokeObjectURL(a.src);
+    audioQueueRef.current = [];
+    playingRef.current = false;
+    setAudioLevel(0);
+  }, [stopTTSAnalyser, setAudioLevel]);
+  interruptAudioRef.current = interruptAudio;
+
+  const queueSentenceTTS = useCallback((sentence: string) => {
+    const clean = sentence.replace(/```[\s\S]*?```/g, 'code block omitted').replace(/[#*_~`>\[\]]/g, '').replace(/\n+/g, ' ').trim();
+    if (!clean) return;
+    synthesizeSpeech(clean).then((blob) => {
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audioQueueRef.current.push(audio);
+      if (!playingRef.current) playNextAudio();
+    }).catch(() => {});
+  }, [playNextAudio]);
+
+  // ── Voice ──
+  const handleVoiceTranscribed = useCallback((text: string) => {
+    const clean = text?.trim();
+    if (clean && clean.length > 1) { setInput(clean); pendingVoiceRef.current = true; }
+  }, []);
+
+  const { state: speechState, error: speechError, available: speechAvailable, startRecording, stopRecording, startBargeInMonitor, stopBargeInMonitor } = useSpeech({
+    onTranscribed: handleVoiceTranscribed,
+  });
+  startRecordingRef.current = startRecording;
+  stopBargeInRef.current = stopBargeInMonitor;
+  startBargeInRef.current = startBargeInMonitor;
+
+  // Show speech errors as toasts
+  useEffect(() => {
+    if (speechError) toast.error(speechError);
+  }, [speechError]);
+
+  // ── Always-on voice ──
+  const sendMessageRef = useRef<(text?: string) => Promise<void>>(undefined);
+  // Will be set after sendMessage is defined — for now set in an effect below
+
+  const alwaysOnEnabled = speechEnabled && voiceAlwaysOn;
+
+  const handleAlwaysOnTranscribed = useCallback((text: string) => {
+    if (text && sendMessageRef.current) {
+      voiceInitiatedRef.current = true;
+      sendMessageRef.current(text);
+    }
+  }, []);
+
+  const handleAlwaysOnBargeIn = useCallback(() => {
+    interruptAudio();
+  }, [interruptAudio]);
+
+  const handleAlwaysOnAudioLevel = useCallback((rms: number) => {
+    // Only update from mic input when Jarvis isn't speaking (TTS analyser handles that)
+    if (!playingRef.current) setAudioLevel(rms);
+  }, [setAudioLevel]);
+
+  const handleAlwaysOnStateChange = useCallback((s: 'idle' | 'monitoring' | 'capturing' | 'transcribing') => {
+    if (playingRef.current) return; // don't override 'speaking' state
+    if (s === 'monitoring') setJarvisState('listening');
+    else if (s === 'capturing') setJarvisState('listening');
+    else if (s === 'transcribing') setJarvisState('thinking');
+    else setJarvisState('idle');
+  }, [setJarvisState]);
+
+  useAlwaysOnVoice({
+    enabled: alwaysOnEnabled,
+    jarvisSpeaking: jarvisState === 'speaking',
+    onTranscribed: handleAlwaysOnTranscribed,
+    onBargeIn: handleAlwaysOnBargeIn,
+    onAudioLevel: handleAlwaysOnAudioLevel,
+    onStateChange: handleAlwaysOnStateChange,
+  });
+
+  const handleMicClick = useCallback(async () => {
+    if (!speechAvailable) {
+      toast.error('Speech backend not available — check server config');
+      return;
+    }
+    interruptAudio();
+    if (speechState === 'recording') {
+      try {
+        const text = await stopRecording();
+        if (text && text.trim()) { setInput(text); pendingVoiceRef.current = true; }
+      } catch {
+        toast.error('Transcription failed');
+      }
+    } else {
+      voiceInitiatedRef.current = true;
+      await startRecording();
+    }
+  }, [speechState, speechAvailable, startRecording, stopRecording, interruptAudio]);
+
+  // ── Streaming ──
+  const stopStreaming = useCallback(() => {
+    abortRef.current?.abort();
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    resetStream();
+  }, [resetStream]);
+
+  const sendMessage = useCallback(async (overrideText?: string) => {
+    const content = (overrideText || input).trim();
+    if (!content || streamState.isStreaming) return;
+    if (!selectedModel) { toast.error('Pick a model first (⌘K)'); return; }
+
+    setInput('');
+    sentenceBufferRef.current = '';
+    audioQueueRef.current = [];
+
+    let convId = activeId;
+    if (!convId) convId = createConversation(selectedModel);
+
+    const userMsg: ChatMessage = { id: generateId(), role: 'user', content, timestamp: Date.now() };
+    addMessage(convId, userMsg);
+
+    const currentMessages = useAppStore.getState().messages;
+    const apiMessages = currentMessages.map((m) => ({ role: m.role, content: m.content }));
+
+    const assistantMsg: ChatMessage = { id: generateId(), role: 'assistant', content: '', timestamp: Date.now() };
+    addMessage(convId, assistantMsg);
+
+    const startTime = Date.now();
+    const timer = setInterval(() => setStreamState({ elapsedMs: Date.now() - startTime }), 100);
+    timerRef.current = timer;
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    let accumulatedContent = '';
+    let usage: TokenUsage | undefined;
+    let complexity: { score: number; tier: string; suggested_max_tokens: number } | undefined;
+    const toolCalls: ToolCallInfo[] = [];
+    let lastFlush = 0;
+    let ttftMs: number | undefined;
+
+    setStreamState({ isStreaming: true, phase: 'Generating...', elapsedMs: 0, activeToolCalls: [], content: '' });
+    setJarvisState('thinking');
+
+    try {
+      for await (const sseEvent of streamChat(
+        { model: selectedModel, messages: apiMessages, stream: true, temperature, max_tokens: maxTokens },
+        controller.signal,
+      )) {
+        const eventName = sseEvent.event;
+        if (eventName === 'agent_turn_start') {
+          setStreamState({ phase: 'Agent thinking...' });
+        } else if (eventName === 'inference_start') {
+          setStreamState({ phase: 'Generating...' });
+        } else if (eventName === 'tool_call_start') {
+          try {
+            const data = JSON.parse(sseEvent.data);
+            const tc: ToolCallInfo = { id: generateId(), tool: data.tool, arguments: data.arguments || '', status: 'running' };
+            toolCalls.push(tc);
+            setStreamState({ phase: `Calling ${data.tool}...`, activeToolCalls: [...toolCalls] });
+            updateLastAssistant(convId, accumulatedContent, [...toolCalls]);
+          } catch {}
+        } else if (eventName === 'tool_call_end') {
+          try {
+            const data = JSON.parse(sseEvent.data);
+            const tc = toolCalls.find((t) => t.tool === data.tool && t.status === 'running');
+            if (tc) { tc.status = data.success ? 'success' : 'error'; tc.latency = data.latency; tc.result = data.result; }
+            setStreamState({ phase: 'Generating...', activeToolCalls: [...toolCalls] });
+            updateLastAssistant(convId, accumulatedContent, [...toolCalls]);
+          } catch {}
+        } else {
+          try {
+            const data = JSON.parse(sseEvent.data);
+            const delta = data.choices?.[0]?.delta;
+            if (data.usage) usage = data.usage;
+            if (data.complexity) complexity = data.complexity;
+            if (delta?.content) {
+              if (!ttftMs) ttftMs = Date.now() - startTime;
+              accumulatedContent += delta.content;
+              setStreamState({ content: accumulatedContent, phase: '' });
+
+              if (speechEnabled) {
+                sentenceBufferRef.current += delta.content;
+                const sentenceMatch = sentenceBufferRef.current.match(/^([\s\S]*?[.!?])\s+([\s\S]*)$/);
+                if (sentenceMatch) {
+                  const completeSentence = sentenceMatch[1].trim();
+                  sentenceBufferRef.current = sentenceMatch[2];
+                  if (completeSentence) queueSentenceTTS(completeSentence);
+                }
+              }
+
+              const now = Date.now();
+              if (now - lastFlush >= 80) {
+                updateLastAssistant(convId, accumulatedContent, toolCalls.length > 0 ? [...toolCalls] : undefined);
+                lastFlush = now;
+              }
+            }
+            if (data.choices?.[0]?.finish_reason === 'stop') break;
+          } catch {}
+        }
+      }
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        if (!accumulatedContent) accumulatedContent = '(Generation stopped)';
+      } else {
+        accumulatedContent = accumulatedContent || `Error: ${err?.message || String(err)}`;
+      }
+    } finally {
+      if (!accumulatedContent) accumulatedContent = 'No response was generated. Please try again.';
+      const totalMs = Date.now() - startTime;
+      const _CLOUD_PREFIXES = ['gpt-', 'o1-', 'o3-', 'o4-', 'claude-', 'gemini-', 'openrouter/', 'MiniMax-', 'chatgpt-'];
+      const engineLabel = _CLOUD_PREFIXES.some(p => selectedModel.startsWith(p)) ? 'cloud' : 'ollama';
+      const telemetry: MessageTelemetry = {
+        engine: engineLabel, model_id: selectedModel, total_ms: totalMs, ttft_ms: ttftMs,
+        tokens_per_sec: usage?.completion_tokens ? usage.completion_tokens / (totalMs / 1000) : undefined,
+        complexity_score: complexity?.score, complexity_tier: complexity?.tier, suggested_max_tokens: complexity?.suggested_max_tokens,
+      };
+      let audioMeta: { url: string } | undefined;
+      try {
+        const digestRes = await fetch(`${getBase()}/api/digest`);
+        if (digestRes.ok) { const digest = await digestRes.json(); if (digest.audio_available) audioMeta = { url: `${getBase()}/api/digest/audio` }; }
+      } catch {}
+
+      updateLastAssistant(convId, accumulatedContent, toolCalls.length > 0 ? toolCalls : undefined, usage, telemetry, audioMeta);
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      resetStream();
+      abortRef.current = null;
+      if (speechEnabled && sentenceBufferRef.current.trim()) { queueSentenceTTS(sentenceBufferRef.current); sentenceBufferRef.current = ''; }
+      if (!playingRef.current) setJarvisState(voiceAlwaysOn ? 'listening' : 'idle');
+      voiceInitiatedRef.current = false;
+      fetchSavings().then((data) => useAppStore.getState().setSavings(data)).catch(() => {});
+    }
+  }, [input, activeId, selectedModel, streamState.isStreaming, createConversation, addMessage, updateLastAssistant, setStreamState, resetStream, temperature, maxTokens, speechEnabled, voiceAlwaysOn, queueSentenceTTS, setJarvisState]);
+
+  // Keep sendMessageRef current for always-on voice callback
+  sendMessageRef.current = sendMessage;
+
+  // Auto-send after voice transcription (manual mic mode)
+  useEffect(() => {
+    if (pendingVoiceRef.current && input.trim()) {
+      pendingVoiceRef.current = false;
+      voiceInitiatedRef.current = true;
+      sendMessage();
+    }
+  }, [input, sendMessage]);
+
+  // Track last response so we can show a brief snippet on the ball
+  useEffect(() => {
+    if (!streamState.isStreaming && messages.length > 0) {
+      const last = messages[messages.length - 1];
+      if (last?.role === 'assistant' && last.content) {
+        lastResponseRef.current = last.content;
+      }
+    }
+  }, [messages, streamState.isStreaming]);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  };
+
+  // ── Derived state ──
   const runningAgents = agents.filter((a) => a.status === 'running');
-  const connectedSources = connectors.filter((c) => c.connected);
-  const statusLabel = isStreaming ? 'Generating' : runningAgents.length > 0 ? 'Agents running' : 'Idle';
+  const voiceStatusLabel = alwaysOnEnabled
+    ? jarvisState === 'speaking' ? 'SPEAKING'
+    : jarvisState === 'listening' ? 'LISTENING'
+    : jarvisState === 'thinking' ? 'PROCESSING'
+    : null
+    : null;
+
+  const statusLabel = voiceStatusLabel || (isStreaming ? 'GENERATING' : runningAgents.length > 0 ? 'AGENTS ACTIVE' : 'STANDING BY');
+  const statusSub = isStreaming
+    ? streamState.phase || 'streaming'
+    : alwaysOnEnabled
+    ? `always-on · ${runningAgents.length > 0 ? `${runningAgents.length} running` : 'idle'} · ${agents.length} agents`
+    : `${runningAgents.length > 0 ? `${runningAgents.length} running` : 'idle'} · memory warm · ${agents.length} agents scheduled`;
+  const modelLabel = selectedModel || serverInfo?.model || 'no model';
+  const engineLabel = serverInfo?.engine || 'local';
+
+  // Telemetry data
+  const latencyMs = streamState.isStreaming ? streamState.elapsedMs : 0;
 
   return (
-    <div className="h-full overflow-y-auto font-mono text-xs text-[#E2E8F0] relative">
+    <div className="h-full overflow-y-auto relative" style={{ background: '#030305', color: '#eef0f4', fontFamily: "'Geist Variable', 'Geist', system-ui, sans-serif" }}>
+      {/* Atmosphere */}
+      <div className="pt-atmosphere" />
 
-      {/* ═══ FULL-BLEED CHROMATIC BACKGROUND ═══ */}
-      {/* Base: 4K dark liquid chrome (native 3840x2160 landscape) */}
-      <div
-        className="fixed inset-0 z-0"
-        style={{
-          backgroundImage: 'url(/chroma-bg-4k.jpg)',
-          backgroundSize: 'cover',
-          backgroundPosition: 'center',
-        }}
-      />
-      {/* Chromatic color overlay — adds prismatic rainbow to the chrome */}
-      <div
-        className="fixed inset-0 z-0 pointer-events-none"
-        style={{
-          background: `
-            radial-gradient(ellipse at 15% 25%, rgba(0, 229, 255, 0.45) 0%, transparent 45%),
-            radial-gradient(ellipse at 75% 15%, rgba(140, 0, 255, 0.35) 0%, transparent 40%),
-            radial-gradient(ellipse at 55% 65%, rgba(255, 0, 128, 0.3) 0%, transparent 45%),
-            radial-gradient(ellipse at 25% 75%, rgba(0, 255, 135, 0.3) 0%, transparent 40%),
-            radial-gradient(ellipse at 85% 55%, rgba(255, 180, 0, 0.25) 0%, transparent 35%),
-            radial-gradient(ellipse at 50% 30%, rgba(255, 0, 200, 0.2) 0%, transparent 50%)
-          `,
-          mixBlendMode: 'soft-light',
-        }}
-      />
-      {/* Subtle scrim for text readability */}
-      <div className="fixed inset-0 z-0 bg-black/25" />
-
-      <div className="flex flex-col p-5 gap-4 relative z-10 min-h-full">
-
-        {/* ═══ HERO ═══ */}
-        <section className="grid grid-cols-12 gap-4">
-
-          {/* Left: Tech Spec Panel — frosted glass */}
-          <div className={`col-span-12 md:col-span-4 ${GLASS} p-4 flex flex-col justify-between relative overflow-hidden`}>
-            <div className="absolute top-0 right-0 px-2 py-1 text-[9px] text-white/30 border-b border-l border-white/[0.06] rounded-bl-lg">TS28</div>
-            <div>
-              <div className="text-white/40 text-[10px] tracking-tighter uppercase">Nanofuel System</div>
-              <h2 className="text-base font-black tracking-wide uppercase mt-1 text-white leading-tight">
-                Experimental<br />Vector<br />Simulation
-              </h2>
-              <div className="mt-3 text-white/30 text-[10px] space-y-0.5">
-                <div>SYS.TM // 2026_XTS263P708R1S2T9U4V5</div>
-                <div>DEV // CRITICAL_CORE_INTERFACE</div>
-              </div>
-            </div>
-
-            {/* Barcode + decoration */}
-            <div className="mt-4 pt-4 border-t border-white/[0.06] flex items-end justify-between">
-              <div className="space-y-1">
-                <div className="text-[9px] text-white/30">SPECIAL EDITION [0 A]</div>
-                <div className="w-28 h-7 relative opacity-30">
-                  <div className="absolute inset-0" style={{ background: 'repeating-linear-gradient(90deg, #fff 0px, #fff 2px, transparent 2px, transparent 5px)' }} />
-                </div>
-              </div>
-              <span className="text-xl text-cyan-400/40">▲</span>
-            </div>
-          </div>
-
-          {/* Right: Chromatic Globe Hero Image */}
-          <div
-            className="col-span-12 md:col-span-8 rounded-2xl overflow-hidden relative h-56 md:h-64 shadow-[0_8px_32px_rgba(0,0,0,0.5)]"
-            style={{
-              backgroundImage: 'url(/chroma-globe.jpg)',
-              backgroundSize: 'cover',
-              backgroundPosition: 'center',
-            }}
+      {/* Frame */}
+      <div className="pt-frame">
+        {/* Top bar */}
+        <div className="pt-topbar">
+          <span className="pt-heartbeat" />
+          <span className="pt-hud">openjarvis // {engineLabel} // {modelLabel}</span>
+          <button
+            className="pt-hud pt-hud-dim"
+            style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer' }}
+            onClick={() => setCommandPaletteOpen(true)}
           >
-            {/* Bottom gradient for text legibility */}
-            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+            ⌘K command
+          </button>
+        </div>
 
-            {/* Bottom: Jarvis identity + status */}
-            <div className="absolute bottom-0 left-0 right-0 p-5 flex justify-between items-end">
-              <div>
-                <h1 className="text-4xl font-extrabold text-white tracking-tight drop-shadow-lg" style={{ fontFamily: 'var(--font-display)' }}>
-                  Jarvis
-                </h1>
-                <p className="text-[11px] text-gray-300 mt-1 flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: statusLabel === 'Idle' ? '#6b7280' : '#00ffcc' }} />
-                  {statusLabel}
-                  <span className="text-white/30">·</span>
-                  <span className="text-cyan-400">{serverInfo?.model || '—'}</span>
-                  <span className="text-white/30">·</span>
-                  {agents.length} agents
-                  <span className="text-white/30">·</span>
-                  {connectedSources.length} sources
-                </p>
-              </div>
-              {/* Right barcode accent */}
-              <div className="flex flex-col items-end">
-                <div className="text-[8px] text-white/30 mb-1">CODE BAR // XTS.90</div>
-                <div className="w-20 h-3 opacity-20" style={{ background: 'repeating-linear-gradient(90deg, #fff 0px, #fff 1px, transparent 1px, transparent 3px)' }} />
-              </div>
-            </div>
-          </div>
-        </section>
+        {/* Grid */}
+        <div className="pt-grid">
+          {/* ── Core Stage — always hero, conversations save to /chat ── */}
+          <div className={`pt-panel pt-core-stage pt-active ${isStreaming ? 'pt-streaming' : ''}`}>
+            <JarvisOrb
+              state={jarvisState}
+              audioLevel={audioLevel}
+              alwaysOnActive={alwaysOnEnabled}
+            />
+            <h1 className="pt-display pt-aberrate" data-text={statusLabel}>{statusLabel}</h1>
+            <div className="pt-hud pt-statusline">{statusSub}</div>
 
-        {/* ═══ DAILY BRIEFING ═══ */}
-        {briefing.status !== 'idle' && (
-          <section className={`${GLASS} overflow-hidden relative`}>
-            {/* Speaking glow */}
-            {briefing.status === 'speaking' && (
-              <div className="absolute inset-0 rounded-2xl pointer-events-none" style={{ boxShadow: '0 0 30px rgba(0, 229, 255, 0.2), inset 0 0 30px rgba(0, 229, 255, 0.06)' }} />
-            )}
-
-            {/* Header */}
-            <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-white/[0.06]">
-              <div className="flex items-center gap-2">
-                <Volume2 size={12} className="text-cyan-400" />
-                <span className="text-[10px] font-semibold tracking-widest uppercase text-cyan-400/70">Daily Briefing</span>
-                {briefing.status === 'speaking' && (
-                  <span className="text-[9px] text-cyan-400/40 animate-pulse">● LIVE</span>
-                )}
-              </div>
-              <div className="flex items-center gap-1.5">
-                {briefing.status === 'speaking' ? (
-                  <button
-                    onClick={interrupt}
-                    className="flex items-center gap-1 px-2 py-1 text-[10px] rounded-lg cursor-pointer transition-colors bg-red-500/10 text-[#ff0055] border border-red-500/15"
-                    title="Stop speaking"
-                  >
-                    <VolumeX size={10} />
-                    Stop
-                  </button>
-                ) : briefing.text && briefing.status === 'ready' ? (
-                  <button
-                    onClick={playBriefing}
-                    className="flex items-center gap-1 px-2 py-1 text-[10px] rounded-lg cursor-pointer transition-colors bg-cyan-500/10 text-[#00e5ff] border border-cyan-500/15"
-                    title="Play briefing"
-                  >
-                    <Play size={10} />
-                    Play
-                  </button>
-                ) : null}
-                <button
-                  onClick={refreshBriefing}
-                  disabled={briefing.status === 'loading' || briefing.status === 'generating'}
-                  className="p-1 rounded-lg cursor-pointer disabled:opacity-30 disabled:cursor-default transition-colors text-white/20 hover:text-white/50"
-                  title="Refresh briefing"
-                >
-                  <RefreshCw size={11} className={briefing.status === 'loading' || briefing.status === 'generating' ? 'animate-spin' : ''} />
-                </button>
-              </div>
-            </div>
-
-            {/* Body */}
-            <div className="px-4 py-3">
-              {(briefing.status === 'loading' || briefing.status === 'generating') && !briefing.text && (
-                <div className="flex items-center gap-2 py-3 justify-center">
-                  <Loader2 size={12} className="animate-spin text-cyan-400/60" />
-                  <span className="text-[11px] text-white/40">
-                    {briefing.status === 'generating' ? 'Preparing your briefing...' : 'Loading briefing...'}
-                  </span>
-                </div>
-              )}
-
-              {briefing.text && (
-                <div className="relative">
-                  {briefing.status === 'speaking' && (
-                    <div className="absolute -left-2.5 top-0 bottom-0 w-0.5 rounded-full animate-pulse" style={{ background: 'linear-gradient(to bottom, #00e5ff, #8c00ff)' }} />
-                  )}
-                  <p className="text-[12px] leading-relaxed text-white/70 whitespace-pre-wrap">
-                    {briefing.text}
-                  </p>
-                </div>
-              )}
-
-              {briefing.status === 'error' && (
-                <div className="text-[11px] text-center py-2 text-white/40">
-                  {briefing.error || 'Could not load briefing.'}
-                  <button onClick={refreshBriefing} className="ml-1.5 underline cursor-pointer text-cyan-400/60">Retry</button>
-                </div>
-              )}
-            </div>
-          </section>
-        )}
-
-        {/* ═══ QUICK ACTIONS ═══ */}
-        <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {ACTION_CARDS.map((card, idx) => (
-            <button
-              key={idx}
-              onClick={() => navigate(card.path)}
-              className={`${GLASS} overflow-hidden p-4 h-32 flex flex-col items-center justify-center gap-2 relative group transition-all duration-300 cursor-pointer text-center hover:bg-white/[0.1] hover:border-white/20 hover:scale-[1.02]`}
-            >
-              {/* Corner labels */}
-              <span className="absolute top-2 left-2.5 text-[8px] text-white/25 uppercase tracking-wider">{card.category}</span>
-              <span className="absolute top-2 right-2.5 text-[8px] text-yellow-400/40 font-mono">{card.id}</span>
-
-              {/* Colored circle icon */}
-              <div
-                className="w-10 h-10 rounded-full flex items-center justify-center shrink-0"
-                style={{ background: `${card.color}18`, border: `1.5px solid ${card.color}30` }}
-              >
-                <card.icon size={18} style={{ color: card.color }} />
-              </div>
-
-              {/* Label */}
-              <div>
-                <div className="text-white font-semibold text-sm tracking-tight">{card.title}</div>
-                <div className="text-white/40 text-[10px] mt-0.5">
-                  {card.title === 'Run Agent'
-                    ? `${agents.length} configured`
-                    : card.title === 'Data Sources'
-                      ? `${connectedSources.length} connected`
-                      : card.sub}
-                </div>
-              </div>
-            </button>
-          ))}
-        </section>
-
-        {/* ═══ INFO GRID: AGENTS + PENDING ═══ */}
-        <section className="grid grid-cols-12 gap-4 flex-1">
-
-          {/* Left: Agents */}
-          <div className={`col-span-12 md:col-span-7 ${GLASS} p-4 flex flex-col`}>
-            <div className="flex justify-between items-center border-b border-white/[0.06] pb-2.5 mb-2">
-              <span className="font-semibold text-sm text-white/90">Agents</span>
+            {/* Input bar — always visible */}
+            <div className="pt-inputbar" onClick={() => inputRef.current?.focus()}>
+              {/* Always-on toggle */}
               <button
-                onClick={() => navigate('/agents')}
-                className="text-cyan-400 text-[11px] hover:underline cursor-pointer flex items-center gap-1"
+                className={`pt-always-on ${alwaysOnEnabled ? 'pt-active' : ''}`}
+                onClick={(e) => { e.stopPropagation(); updateSettings({ voiceAlwaysOn: !voiceAlwaysOn }); }}
+                disabled={!speechEnabled}
+                title={alwaysOnEnabled ? 'Disable always-on listening' : 'Enable always-on listening'}
               >
-                Manage <ArrowRight size={10} />
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <circle cx="8" cy="8" r="3" stroke="currentColor" strokeWidth="1.5" />
+                  <path d="M4 4C2.9 5.1 2.2 6.5 2.2 8s.7 2.9 1.8 4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                  <path d="M12 4c1.1 1.1 1.8 2.5 1.8 4s-.7 2.9-1.8 4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                </svg>
               </button>
-            </div>
-
-            {agents.length === 0 ? (
-              <div className="flex-1 flex items-center justify-center text-white/30 text-[11px]">
-                No agents configured
-              </div>
-            ) : (
-              <div className="flex-1 flex flex-col justify-center">
-                {agents.map((agent, i) => {
-                  const s = agentStatus(agent);
-                  const Icon = AGENT_ICONS[i % AGENT_ICONS.length];
-                  return (
-                    <div
-                      key={agent.id}
-                      className="flex justify-between items-center py-2.5 text-white/70 hover:bg-white/[0.03] px-2 rounded-lg transition"
-                    >
-                      <div className="flex items-center gap-3">
-                        <Icon size={14} className="text-white/30" />
-                        <span className="font-medium text-[13px]">{agent.name}</span>
-                      </div>
-                      <div className="flex items-center gap-3 text-[11px]">
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: s.color }} />
-                          <span style={{ color: s.color }}>{s.label}</span>
-                        </div>
-                        {agent.last_run_at && (
-                          <span className="font-mono text-white/30 w-8 text-right">{timeAgo(agent.last_run_at)}</span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Right: Pending + System Stable */}
-          <div className="col-span-12 md:col-span-5 flex flex-col gap-4">
-
-            {/* Pending */}
-            <div className={`${GLASS} p-4 flex flex-col`}>
-              <div className="flex justify-between items-center border-b border-white/[0.06] pb-2.5 mb-2">
-                <span className="font-semibold text-sm text-white/90">Pending</span>
-                {approvals.length > 0 && (
-                  <span className="text-[10px] text-yellow-400/70 font-mono">[{approvals.length}]</span>
-                )}
-              </div>
-
-              {approvals.length === 0 ? (
-                <div className="text-center py-3 text-white/30 text-[12px] flex items-center justify-center gap-1.5">
-                  <CheckCircle size={12} className="text-white/20" /> All clear
-                </div>
+              {/* Manual mic button — hidden when always-on is active */}
+              {!alwaysOnEnabled && (
+                <button
+                  className={`pt-mic ${speechState === 'recording' ? 'pt-recording' : ''}`}
+                  onClick={(e) => { e.stopPropagation(); handleMicClick(); }}
+                  disabled={!speechEnabled || !speechAvailable || streamState.isStreaming}
+                  title={!speechAvailable ? 'Speech backend unavailable' : speechState === 'recording' ? 'Stop recording' : 'Start recording'}
+                >
+                  ●
+                </button>
+              )}
+              <input
+                ref={inputRef}
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={selectedModel ? 'Speak or type a command...' : 'Select a model first (⌘K)...'}
+                disabled={streamState.isStreaming}
+              />
+              {streamState.isStreaming ? (
+                <button className="pt-stop" onClick={stopStreaming} title="Stop generating">
+                  <Square size={12} />
+                </button>
               ) : (
-                <div className="flex flex-col gap-2">
-                  {approvals.slice(0, 3).map((action) => (
-                    <ApprovalCard
-                      key={action.id}
-                      action={action}
-                      loading={!!processing[action.id]}
-                      onApprove={handleApprove}
-                      onDeny={handleDeny}
-                    />
-                  ))}
-                </div>
+                <>
+                  {input.trim() ? (
+                    <button
+                      className="pt-send"
+                      onClick={() => sendMessage()}
+                      disabled={!input.trim() || !selectedModel}
+                      title="Send"
+                    >
+                      <Send size={16} />
+                    </button>
+                  ) : (
+                    <span className="pt-wave" aria-hidden="true">
+                      <span /><span /><span /><span /><span />
+                    </span>
+                  )}
+                </>
               )}
             </div>
+          </div>
 
-            {/* System Stable — uses the hero portrait image for contrast */}
-            <div
-              className="rounded-2xl overflow-hidden relative h-28 flex flex-col justify-center items-center shadow-[0_8px_32px_rgba(0,0,0,0.5)]"
-              style={{
-                backgroundImage: 'url(/chroma-muted.jpg)',
-                backgroundSize: 'cover',
-                backgroundPosition: 'center',
-              }}
-            >
-              <div className="absolute inset-0 bg-black/40" />
-              <div className="z-10 text-center tracking-widest text-white font-black uppercase text-sm drop-shadow-[0_2px_8px_rgba(0,0,0,0.9)]">
-                System Stable
+          {/* ── Rail ── */}
+          <div className="pt-rail">
+            {/* Daily Briefing */}
+            {briefing.status !== 'idle' && (
+              <div className="pt-panel pt-card">
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+                  <h3 style={{ marginBottom: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    Daily Briefing
+                    {briefing.status === 'speaking' && (
+                      <span className="pt-hud" style={{ color: '#3df2dd', fontSize: 9, animation: 'pt-beat 1.5s ease-in-out infinite' }}>● LIVE</span>
+                    )}
+                  </h3>
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    {briefing.status === 'speaking' ? (
+                      <button className="pt-briefing-ctrl pt-stop-ctrl" onClick={interrupt}><VolumeX size={10} /> Stop</button>
+                    ) : briefing.text && briefing.status === 'ready' ? (
+                      <button className="pt-briefing-ctrl" onClick={playBriefing} style={{ color: '#3df2dd' }}><Play size={10} /> Play</button>
+                    ) : null}
+                    <button
+                      className="pt-briefing-ctrl"
+                      onClick={refreshBriefing}
+                      disabled={briefing.status === 'loading' || briefing.status === 'generating'}
+                      style={{ color: '#5c5e68' }}
+                    >
+                      <RefreshCw size={10} className={briefing.status === 'loading' || briefing.status === 'generating' ? 'animate-spin' : ''} />
+                    </button>
+                  </div>
+                </div>
+                {(briefing.status === 'loading' || briefing.status === 'generating') && !briefing.text && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center', padding: '12px 0' }}>
+                    <Loader2 size={12} className="animate-spin" style={{ color: '#3df2dd' }} />
+                    <span className="pt-hud" style={{ fontSize: 11 }}>{briefing.status === 'generating' ? 'Preparing briefing...' : 'Loading...'}</span>
+                  </div>
+                )}
+                {briefing.text && (
+                  <div style={{ position: 'relative' }}>
+                    {briefing.status === 'speaking' && <div className="pt-briefing-live-bar" />}
+                    <p className="pt-briefing-body" style={{ paddingLeft: briefing.status === 'speaking' ? 10 : 0 }}>
+                      {briefing.text}
+                    </p>
+                  </div>
+                )}
+                {briefing.followUpQuestions && briefing.followUpQuestions.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10 }}>
+                    <span className="pt-hud" style={{ fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#5c5e68' }}>Quick check</span>
+                    {briefing.followUpQuestions.map((q, i) => (
+                      <button
+                        key={i}
+                        className="pt-followup-chip"
+                        onClick={() => { setInput(q); inputRef.current?.focus(); }}
+                        style={{
+                          background: 'rgba(61, 242, 221, 0.06)',
+                          border: '1px solid rgba(61, 242, 221, 0.15)',
+                          borderRadius: 6,
+                          padding: '6px 10px',
+                          color: '#a8aab4',
+                          fontSize: 11,
+                          lineHeight: 1.4,
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                          transition: 'all 150ms ease',
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(61, 242, 221, 0.12)'; e.currentTarget.style.color = '#eef0f4'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(61, 242, 221, 0.06)'; e.currentTarget.style.color = '#a8aab4'; }}
+                      >
+                        {q}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {briefing.status === 'error' && (
+                  <div className="pt-hud" style={{ textAlign: 'center', padding: '8px 0', fontSize: 11 }}>
+                    {briefing.error || 'Could not load briefing.'}
+                    <button onClick={refreshBriefing} style={{ marginLeft: 6, color: '#3df2dd', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}>
+                      Retry
+                    </button>
+                  </div>
+                )}
               </div>
-              <div className="absolute bottom-2 right-3 text-[8px] text-white/30 tracking-wider z-10">VER. XTS</div>
+            )}
+
+            {/* Approval pending */}
+            {approvals.length > 0 && (
+              <div className="pt-panel pt-card pt-attention">
+                <h3>Approval pending</h3>
+                {approvals.slice(0, 3).map((action) => (
+                  <div key={action.id}>
+                    <div style={{ fontSize: '13.5px', color: '#a8aab4', lineHeight: 1.55 }}>
+                      <b style={{ color: '#eef0f4', fontWeight: 500 }}>{action.action_type}</b>{' '}
+                      {action.description}
+                    </div>
+                    <div className="pt-btnrow">
+                      <button
+                        className="pt-ghost pt-approve"
+                        onClick={() => handleApprove(action.id)}
+                        disabled={!!processing[action.id]}
+                      >
+                        APPROVE
+                      </button>
+                      <button
+                        className="pt-ghost"
+                        onClick={() => handleDeny(action.id)}
+                        disabled={!!processing[action.id]}
+                      >
+                        DENY
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Agents */}
+            <div className="pt-panel pt-card">
+              <h3>Agents</h3>
+              {agents.length === 0 ? (
+                <div className="pt-hud pt-hud-dim" style={{ textAlign: 'center', padding: '12px 0' }}>No agents configured</div>
+              ) : (
+                agents.map((agent) => (
+                  <div className="pt-row" key={agent.id}>
+                    <span className={`pt-dot ${agentDotClass(agent.status)}`} />
+                    {agent.name}
+                    <span className="pt-meta pt-hud pt-hud-dim">{agentLabel(agent.status)}</span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
-        </section>
+        </div>
 
-        {/* ═══ BOTTOM: Chromatic Graffiti Text ═══ */}
-        <section className="mt-2 flex items-center gap-4 overflow-hidden">
-          <div className="flex items-center gap-3">
-            <span className="text-2xl text-white/15">✦</span>
-            <span className="text-2xl text-white/8">◆</span>
-          </div>
-          <h2
-            className="chromatic-text-fill text-6xl md:text-7xl font-black uppercase tracking-tighter leading-none select-none whitespace-nowrap"
-            style={{ fontFamily: 'var(--font-display)' }}
-          >
-            OPENJARVIS
-          </h2>
-          <div className="flex items-center gap-3">
-            <span className="text-2xl text-white/8">◆</span>
-            <span className="text-2xl text-white/15">✦</span>
-          </div>
-        </section>
-
-        {/* ═══ TICKER BAR ═══ */}
-        <footer className="border-t border-white/[0.06] pt-2 cyber-ticker text-[10px] text-white/30 tracking-wider">
-          <div className="cyber-ticker-track">
-            {TICKER_TEXT.repeat(4)}
-          </div>
-        </footer>
-
-      </div>
-    </div>
-  );
-}
-
-/* ── Approval Card ── */
-
-function ApprovalCard({ action, loading, onApprove, onDeny }: {
-  action: PendingApproval; loading: boolean;
-  onApprove: (id: string) => void; onDeny: (id: string) => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const tierColor = TIER_COLORS[action.tier] || TIER_COLORS.medium;
-  const hasPayload = Object.keys(action.payload ?? {}).length > 0;
-
-  return (
-    <div className={`p-2.5 ${GLASS_INNER} relative z-10`}>
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-[11px] font-medium text-cyan-400">{action.action_type}</span>
-        <span className="text-[10px] font-mono tracking-wide" style={{ color: tierColor }}>{action.tier}</span>
-      </div>
-      <p className="text-[11px] mb-1.5 leading-relaxed text-white/50">{action.description}</p>
-      {hasPayload && (
-        <button className="flex items-center gap-1 text-[10px] mb-1.5 cursor-pointer text-white/30" onClick={() => setExpanded(!expanded)}>
-          {expanded ? <ChevronUp size={9} /> : <ChevronDown size={9} />}
-          {expanded ? 'Hide' : 'Details'}
-        </button>
-      )}
-      {expanded && (
-        <pre className="text-[10px] p-1.5 mb-1.5 overflow-x-auto rounded-lg bg-black/40 text-white/40 font-mono" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-          {JSON.stringify(action.payload, null, 2)}
-        </pre>
-      )}
-      <div className="flex gap-2">
-        <button onClick={() => onApprove(action.id)} disabled={loading}
-          className="flex-1 flex items-center justify-center gap-1 py-1 text-[11px] font-medium cursor-pointer disabled:opacity-40 rounded-lg transition-colors border border-white/[0.06] hover:bg-white/[0.05] text-green-400"
-        >
-          <CheckCircle size={10} /> Approve
-        </button>
-        <button onClick={() => onDeny(action.id)} disabled={loading}
-          className="flex-1 flex items-center justify-center gap-1 py-1 text-[11px] font-medium cursor-pointer disabled:opacity-40 rounded-lg transition-colors border border-white/[0.06] hover:bg-white/[0.05] text-red-400"
-        >
-          <XCircle size={10} /> Deny
-        </button>
+        {/* Telemetry footer */}
+        <div className="pt-panel pt-telemetry">
+          <span className="pt-hud">latency <b>{latencyMs ? `${latencyMs}ms` : '—'}</b></span>
+          <span className="pt-hud">{engineLabel} <b>{modelLabel}</b></span>
+          {approvals.length > 0 && (
+            <span className="pt-hud" style={{ marginLeft: 'auto', color: '#f5a524' }}>
+              {approvals.length} approval{approvals.length > 1 ? 's' : ''} pending
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );
