@@ -90,6 +90,87 @@ def is_cloud_model(model: str) -> bool:
     return get_provider(model) is not None
 
 
+def is_billing_or_auth_error(exc: Exception) -> bool:
+    """Return True if the exception indicates a billing, quota, or auth failure."""
+    # Anthropic SDK errors
+    for attr in ("status_code", "status"):
+        code = getattr(exc, attr, None)
+        if code in (400, 401, 402, 403, 429):
+            msg = str(exc).lower()
+            if any(kw in msg for kw in (
+                "credit", "balance", "billing", "quota", "rate",
+                "exceeded", "limit", "insufficient", "payment",
+                "unauthorized", "authentication", "permission",
+            )):
+                return True
+    # httpx.HTTPStatusError
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        code = getattr(resp, "status_code", None)
+        if code in (400, 401, 402, 403, 429):
+            msg = str(exc).lower()
+            if any(kw in msg for kw in (
+                "credit", "balance", "billing", "quota", "rate",
+                "exceeded", "limit", "insufficient", "payment",
+            )):
+                return True
+    return False
+
+
+# Fallback chain: provider → ordered list of (provider, model) to try
+_FALLBACK_CHAIN: dict[str, list[tuple[str, str]]] = {
+    "anthropic": [
+        ("google", "gemini-2.5-flash"),
+        ("openai", "gpt-4o-mini"),
+        ("groq", "groq/llama-3.3-70b-versatile"),
+    ],
+    "openai": [
+        ("anthropic", "claude-sonnet-4-20250514"),
+        ("google", "gemini-2.5-flash"),
+        ("groq", "groq/llama-3.3-70b-versatile"),
+    ],
+    "google": [
+        ("anthropic", "claude-sonnet-4-20250514"),
+        ("openai", "gpt-4o-mini"),
+        ("groq", "groq/llama-3.3-70b-versatile"),
+    ],
+    "groq": [
+        ("google", "gemini-2.5-flash"),
+        ("openai", "gpt-4o-mini"),
+        ("anthropic", "claude-sonnet-4-20250514"),
+    ],
+    "deepseek": [
+        ("google", "gemini-2.5-flash"),
+        ("groq", "groq/llama-3.3-70b-versatile"),
+        ("openai", "gpt-4o-mini"),
+    ],
+}
+
+# Map provider names to their API key env var names
+_PROVIDER_KEY_NAMES: dict[str, list[str]] = {
+    "anthropic": ["ANTHROPIC_API_KEY"],
+    "openai": ["OPENAI_API_KEY"],
+    "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    "groq": ["GROQ_API_KEY"],
+    "deepseek": ["DEEPSEEK_API_KEY"],
+    "openrouter": ["OPENROUTER_API_KEY"],
+    "minimax": ["MINIMAX_API_KEY"],
+}
+
+
+def get_fallback_model(failed_model: str) -> str | None:
+    """Return the best available fallback model, or None if nothing is available."""
+    provider = get_provider(failed_model)
+    if not provider or provider not in _FALLBACK_CHAIN:
+        return None
+    keys = _load_keys()
+    for fb_provider, fb_model in _FALLBACK_CHAIN[provider]:
+        key_names = _PROVIDER_KEY_NAMES.get(fb_provider, [])
+        if any(keys.get(k) for k in key_names):
+            return fb_model
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Message conversion
 # ---------------------------------------------------------------------------

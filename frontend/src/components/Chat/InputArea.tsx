@@ -188,16 +188,24 @@ export function InputArea() {
 
   // Abort in-flight stream when the user switches models mid-generation.
   // This prevents errors from trying to continue a stream with a stale model.
+  // Backend-initiated fallback switches set this ref to skip the abort.
   const prevModelRef = useRef(selectedModel);
+  const fallbackSwitchRef = useRef(false);
   useEffect(() => {
     if (prevModelRef.current !== selectedModel && streamState.isStreaming) {
-      abortRef.current?.abort();
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
+      if (fallbackSwitchRef.current) {
+        // Backend fallback — don't abort, just acknowledge the new model
+        fallbackSwitchRef.current = false;
+      } else {
+        // User-initiated switch — abort the stream
+        abortRef.current?.abort();
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
+        resetStream();
+        abortRef.current = null;
       }
-      resetStream();
-      abortRef.current = null;
     }
     prevModelRef.current = selectedModel;
   }, [selectedModel, streamState.isStreaming, resetStream]);
@@ -276,10 +284,23 @@ export function InputArea() {
 
     // Build API messages before adding assistant placeholder
     const currentMessages = useAppStore.getState().messages;
-    const apiMessages = currentMessages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
+    const apiMessages: { role: string; content: string }[] = [];
+
+    // Inject briefing context so the model knows what the daily briefing contained
+    const briefingText = useAppStore.getState().briefing.text;
+    if (briefingText) {
+      apiMessages.push({
+        role: 'system',
+        content: `[Daily Briefing Context]\nThe user was shown the following daily briefing at the start of this session. They may reference it or ask to modify it.\n\n${briefingText}`,
+      });
+    }
+
+    apiMessages.push(
+      ...currentMessages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      })),
+    );
 
     const assistantMsg: ChatMessage = {
       id: generateId(),
@@ -303,6 +324,7 @@ export function InputArea() {
     let accumulatedContent = '';
     let usage: TokenUsage | undefined;
     let complexity: { score: number; tier: string; suggested_max_tokens: number } | undefined;
+    let actualModel = selectedModel; // tracks the real model (may change on provider fallback)
     const toolCalls: ToolCallInfo[] = [];
     const researchTraces: ResearchSearchTrace[] = [];
     const researchSourcesByRef = new Map<number, ResearchSource>();
@@ -506,6 +528,12 @@ export function InputArea() {
             const delta = data.choices?.[0]?.delta;
             if (data.usage) usage = data.usage;
             if (data.complexity) complexity = data.complexity;
+            // Detect provider fallback — backend switches model on billing errors
+            if (data.model && data.model !== actualModel) {
+              actualModel = data.model;
+              fallbackSwitchRef.current = true;
+              useAppStore.getState().setSelectedModel(actualModel);
+            }
             if (delta?.content) {
               if (!ttftMs) ttftMs = Date.now() - startTime;
               accumulatedContent += delta.content;
@@ -558,11 +586,11 @@ export function InputArea() {
         accumulatedContent = 'No response was generated. Please try again.';
       }
       const totalMs = Date.now() - startTime;
-      const _CLOUD_PREFIXES = ['gpt-', 'o1-', 'o3-', 'o4-', 'claude-', 'gemini-', 'openrouter/', 'MiniMax-', 'chatgpt-'];
-      const engineLabel = _CLOUD_PREFIXES.some(p => selectedModel.startsWith(p)) ? 'cloud' : 'ollama';
+      const _CLOUD_PREFIXES = ['gpt-', 'o1-', 'o3-', 'o4-', 'claude-', 'gemini-', 'openrouter/', 'MiniMax-', 'chatgpt-', 'groq/'];
+      const engineLabel = _CLOUD_PREFIXES.some(p => actualModel.startsWith(p)) ? 'cloud' : 'ollama';
       const telemetry: MessageTelemetry = {
         engine: engineLabel,
-        model_id: selectedModel,
+        model_id: actualModel,
         total_ms: totalMs,
         ttft_ms: ttftMs,
         tokens_per_sec: usage?.completion_tokens

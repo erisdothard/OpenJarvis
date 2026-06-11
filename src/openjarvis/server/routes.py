@@ -184,6 +184,36 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                 exc_info=True,
             )
 
+    # Inject system prompt (persona, SOUL/MEMORY/USER) when no system message
+    # is already present.  This ensures the streaming chat path gets the same
+    # identity / persona context that the managed-agent path receives (#431).
+    _has_system = any(m.role == "system" for m in request_body.messages)
+    if not _has_system and config is not None:
+        try:
+            from openjarvis.prompt.builder import SystemPromptBuilder
+            from openjarvis.server.models import ChatMessage
+
+            agent_cfg = getattr(config, "agent", None)
+            agent_template = ""
+            if agent_cfg:
+                agent_template = (
+                    agent_cfg.system_prompt
+                    or agent_cfg.default_system_prompt
+                )
+            builder = SystemPromptBuilder(
+                agent_template=agent_template,
+                memory_files_config=getattr(config, "memory_files", None),
+                system_prompt_config=getattr(config, "system_prompt", None),
+            )
+            sys_prompt = builder.build()
+            if sys_prompt and sys_prompt.strip():
+                request_body.messages.insert(
+                    0,
+                    ChatMessage(role="system", content=sys_prompt.strip()),
+                )
+        except Exception:
+            logger.debug("System prompt injection failed", exc_info=True)
+
     if request_body.stream:
         # Auto-inject registered tools when the client doesn't pass any.
         # This enables the main chat UI to call tools (calendar, email, etc.)
@@ -392,21 +422,26 @@ async def _handle_stream_with_tool_loop(
     Max 5 turns to prevent infinite loops.
     """
     from openjarvis.core.registry import ToolRegistry
-    from openjarvis.server.cloud_router import is_cloud_model
+    from openjarvis.server.cloud_router import (
+        get_fallback_model,
+        is_billing_or_auth_error,
+        is_cloud_model,
+    )
 
     messages = _to_messages(req.messages)
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     use_cloud = is_cloud_model(model)
     app_state = request.app.state
+    active_model = model  # may change if we fall back
 
     async def generate():
-        nonlocal messages
+        nonlocal messages, active_model
         MAX_TOOL_TURNS = 5
 
         # Send role chunk first (OpenAI convention)
         first_chunk = ChatCompletionChunk(
             id=chunk_id,
-            model=model,
+            model=active_model,
             choices=[StreamChoice(delta=DeltaMessage(role="assistant"))],
         )
         yield f"data: {first_chunk.model_dump_json()}\n\n"
@@ -420,7 +455,7 @@ async def _handle_stream_with_tool_loop(
             try:
                 async for sc in engine.stream_full(
                     messages,
-                    model=model,
+                    model=active_model,
                     temperature=req.temperature,
                     max_tokens=req.max_tokens,
                     tools=req.tools,
@@ -430,7 +465,7 @@ async def _handle_stream_with_tool_loop(
                         # Stream content tokens to client in real time
                         content_chunk = ChatCompletionChunk(
                             id=chunk_id,
-                            model=model,
+                            model=active_model,
                             choices=[StreamChoice(delta=DeltaMessage(content=sc.content))],
                         )
                         yield f"data: {content_chunk.model_dump_json()}\n\n"
@@ -455,10 +490,31 @@ async def _handle_stream_with_tool_loop(
                     if sc.finish_reason:
                         finish_reason = sc.finish_reason
             except Exception as exc:
+                # --- Provider fallback on billing / auth errors ---
+                if _turn == 0 and not turn_content and is_billing_or_auth_error(exc):
+                    fallback = get_fallback_model(active_model)
+                    if fallback:
+                        logger.warning(
+                            "Provider error for %s (%s), falling back to %s",
+                            active_model, exc, fallback,
+                        )
+                        notice = (
+                            f"*Switched from `{active_model}` to `{fallback}` "
+                            f"(provider billing/auth error).*\n\n"
+                        )
+                        notice_chunk = ChatCompletionChunk(
+                            id=chunk_id,
+                            model=fallback,
+                            choices=[StreamChoice(delta=DeltaMessage(content=notice))],
+                        )
+                        yield f"data: {notice_chunk.model_dump_json()}\n\n"
+                        active_model = fallback
+                        continue  # retry this turn with the fallback model
+
                 logger.error("Tool-loop stream error: %s", exc, exc_info=True)
                 error_chunk = ChatCompletionChunk(
                     id=chunk_id,
-                    model=model,
+                    model=active_model,
                     choices=[StreamChoice(
                         delta=DeltaMessage(content=f"\n\nError: {exc}"),
                         finish_reason="stop",
@@ -557,17 +613,17 @@ async def _handle_stream_with_tool_loop(
                 if _m.role == "user" and _m.content:
                     _user_q = _m.content
                     break
-            _store_chat_turn(_mem, _user_q, turn_content, model)
+            _store_chat_turn(_mem, _user_q, turn_content, active_model)
 
         # Send finish chunk
         finish_data = ChatCompletionChunk(
             id=chunk_id,
-            model=model,
+            model=active_model,
             choices=[StreamChoice(delta=DeltaMessage(), finish_reason="stop")],
         )
         finish_dict = json.loads(finish_data.model_dump_json())
         finish_dict.setdefault("telemetry", {})
-        finish_dict["telemetry"]["engine"] = "cloud" if use_cloud else "ollama"
+        finish_dict["telemetry"]["engine"] = "cloud" if is_cloud_model(active_model) else "ollama"
         if complexity_info is not None:
             finish_dict["complexity"] = complexity_info.model_dump()
         yield f"data: {json.dumps(finish_dict)}\n\n"
@@ -697,6 +753,8 @@ async def _handle_stream(
 ):
     """Stream response using SSE format."""
     from openjarvis.server.cloud_router import (
+        get_fallback_model,
+        is_billing_or_auth_error,
         is_cloud_model,
         stream_cloud,
         stream_local,
@@ -704,16 +762,15 @@ async def _handle_stream(
 
     messages = _to_messages(req.messages)
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-
-    # Route directly to the right backend — bypasses engine routing entirely
-    # so broken MultiEngine state can never misdirect requests.
-    use_cloud = is_cloud_model(model)
+    active_model = model
 
     async def generate():
+        nonlocal active_model
+
         # Send role chunk first
         first_chunk = ChatCompletionChunk(
             id=chunk_id,
-            model=model,
+            model=active_model,
             choices=[
                 StreamChoice(
                     delta=DeltaMessage(role="assistant"),
@@ -722,52 +779,42 @@ async def _handle_stream(
         )
         yield f"data: {first_chunk.model_dump_json()}\n\n"
 
-        try:
-            # Cloud models → direct cloud API (reads keys from disk).
-            # Local models → engine.stream() first so mock engines work in
-            # tests.  Fall back to stream_local() only when the engine would
-            # mis-route the request to a cloud backend (MultiEngine routing
-            # confusion), which is detected by checking the routed engine's
-            # is_cloud attribute.
-            if use_cloud:
-                token_iter = stream_cloud(
-                    model, messages, req.temperature, req.max_tokens
+        def _build_token_iter(mdl):
+            """Return the right stream iterator for the given model."""
+            if is_cloud_model(mdl):
+                return stream_cloud(
+                    mdl, messages, req.temperature, req.max_tokens
                 )
-            else:
-                # Use engine.stream() by default (preserves mock-engine
-                # compatibility in tests).  Only fall back to stream_local()
-                # when a real MultiEngine would mis-route the local model to a
-                # cloud backend — detected via isinstance so mocks are not
-                # accidentally matched.
-                _use_local_fallback = False
-                try:
-                    from openjarvis.engine.multi import MultiEngine
+            _use_local_fallback = False
+            try:
+                from openjarvis.engine.multi import MultiEngine
 
-                    _inner = getattr(engine, "_inner", engine)
-                    if isinstance(_inner, MultiEngine):
-                        _routed = _inner._engine_for(model)
-                        if _routed is not None and getattr(_routed, "is_cloud", False):
-                            _use_local_fallback = True
-                    elif getattr(_inner, "is_cloud", False):
-                        # Plain cloud engine with a local model — route to Ollama
+                _inner = getattr(engine, "_inner", engine)
+                if isinstance(_inner, MultiEngine):
+                    _routed = _inner._engine_for(mdl)
+                    if _routed is not None and getattr(_routed, "is_cloud", False):
                         _use_local_fallback = True
-                except Exception:
-                    pass
-                if _use_local_fallback:
-                    token_iter = stream_local(
-                        model, messages, req.temperature, req.max_tokens
-                    )
-                else:
-                    token_iter = engine.stream(
-                        messages,
-                        model=model,
-                        temperature=req.temperature,
-                        max_tokens=req.max_tokens,
-                    )
+                elif getattr(_inner, "is_cloud", False):
+                    _use_local_fallback = True
+            except Exception:
+                pass
+            if _use_local_fallback:
+                return stream_local(
+                    mdl, messages, req.temperature, req.max_tokens
+                )
+            return engine.stream(
+                messages,
+                model=mdl,
+                temperature=req.temperature,
+                max_tokens=req.max_tokens,
+            )
+
+        try:
+            token_iter = _build_token_iter(active_model)
             async for token in token_iter:
                 chunk = ChatCompletionChunk(
                     id=chunk_id,
-                    model=model,
+                    model=active_model,
                     choices=[
                         StreamChoice(
                             delta=DeltaMessage(content=token),
@@ -776,37 +823,97 @@ async def _handle_stream(
                 )
                 yield f"data: {chunk.model_dump_json()}\n\n"
         except Exception as exc:
-            # Surface errors as a content chunk so the frontend can
-            # display them instead of silently failing.
-            import logging
-
-            logging.getLogger("openjarvis.server").error(
-                "Stream error: %s",
-                exc,
-                exc_info=True,
-            )
-            error_chunk = ChatCompletionChunk(
-                id=chunk_id,
-                model=model,
-                choices=[
-                    StreamChoice(
-                        delta=DeltaMessage(
-                            content=f"\n\nError during generation: {exc}",
-                        ),
-                        finish_reason="stop",
+            # --- Provider fallback on billing / auth errors ---
+            if is_billing_or_auth_error(exc):
+                fallback = get_fallback_model(active_model)
+                if fallback:
+                    logger.warning(
+                        "Provider error for %s (%s), falling back to %s",
+                        active_model, exc, fallback,
                     )
-                ],
-            )
-            yield f"data: {error_chunk.model_dump_json()}\n\n"
-            yield "data: [DONE]\n\n"
-            return
+                    notice = (
+                        f"*Switched from `{active_model}` to `{fallback}` "
+                        f"(provider billing/auth error).*\n\n"
+                    )
+                    notice_chunk = ChatCompletionChunk(
+                        id=chunk_id,
+                        model=fallback,
+                        choices=[StreamChoice(delta=DeltaMessage(content=notice))],
+                    )
+                    yield f"data: {notice_chunk.model_dump_json()}\n\n"
+                    active_model = fallback
+                    try:
+                        token_iter = _build_token_iter(active_model)
+                        async for token in token_iter:
+                            chunk = ChatCompletionChunk(
+                                id=chunk_id,
+                                model=active_model,
+                                choices=[
+                                    StreamChoice(
+                                        delta=DeltaMessage(content=token),
+                                    )
+                                ],
+                            )
+                            yield f"data: {chunk.model_dump_json()}\n\n"
+                    except Exception as fallback_exc:
+                        logger.error("Fallback stream error: %s", fallback_exc, exc_info=True)
+                        error_chunk = ChatCompletionChunk(
+                            id=chunk_id,
+                            model=active_model,
+                            choices=[
+                                StreamChoice(
+                                    delta=DeltaMessage(
+                                        content=f"\n\nFallback also failed: {fallback_exc}",
+                                    ),
+                                    finish_reason="stop",
+                                )
+                            ],
+                        )
+                        yield f"data: {error_chunk.model_dump_json()}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+                else:
+                    # No fallback available — surface original error
+                    logger.error("Stream error (no fallback): %s", exc, exc_info=True)
+                    error_chunk = ChatCompletionChunk(
+                        id=chunk_id,
+                        model=active_model,
+                        choices=[
+                            StreamChoice(
+                                delta=DeltaMessage(
+                                    content=f"\n\nError: {exc}\n\nNo fallback provider available.",
+                                ),
+                                finish_reason="stop",
+                            )
+                        ],
+                    )
+                    yield f"data: {error_chunk.model_dump_json()}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+            else:
+                logger.error("Stream error: %s", exc, exc_info=True)
+                error_chunk = ChatCompletionChunk(
+                    id=chunk_id,
+                    model=active_model,
+                    choices=[
+                        StreamChoice(
+                            delta=DeltaMessage(
+                                content=f"\n\nError during generation: {exc}",
+                            ),
+                            finish_reason="stop",
+                        )
+                    ],
+                )
+                yield f"data: {error_chunk.model_dump_json()}\n\n"
+                yield "data: [DONE]\n\n"
+                return
 
         # Send finish chunk with usage data if available
         import json as _json
 
         finish_data = ChatCompletionChunk(
             id=chunk_id,
-            model=model,
+            model=active_model,
             choices=[
                 StreamChoice(
                     delta=DeltaMessage(),
@@ -817,10 +924,8 @@ async def _handle_stream(
         finish_dict = _json.loads(finish_data.model_dump_json())
 
         # Tag the finish chunk with the correct engine label.
-        # We use the routing decision (use_cloud) directly rather than
-        # unwrapping the engine chain, which can be in a broken state.
         finish_dict.setdefault("telemetry", {})
-        finish_dict["telemetry"]["engine"] = "cloud" if use_cloud else "ollama"
+        finish_dict["telemetry"]["engine"] = "cloud" if is_cloud_model(active_model) else "ollama"
 
         if complexity_info is not None:
             finish_dict["complexity"] = complexity_info.model_dump()
