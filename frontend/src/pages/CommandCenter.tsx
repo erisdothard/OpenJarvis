@@ -158,10 +158,15 @@ export function CommandCenter() {
       playingRef.current = false;
       currentAudioRef.current = null;
       stopTTSAnalyser();
-      setJarvisState(voiceAlwaysOn ? 'listening' : 'idle');
       setAudioLevel(0);
       stopBargeInRef.current();
       voiceInitiatedRef.current = false;
+      // Only reset to idle when streaming is ALSO done — otherwise stay
+      // in 'thinking' so the orb/status doesn't flicker between TTS sentences.
+      const stillStreaming = useAppStore.getState().streamState.isStreaming;
+      if (!stillStreaming) {
+        setJarvisState('idle');
+      }
       return;
     }
     playingRef.current = true;
@@ -267,6 +272,8 @@ export function CommandCenter() {
 
   const handleAlwaysOnStateChange = useCallback((s: 'idle' | 'monitoring' | 'capturing' | 'transcribing') => {
     if (playingRef.current) return; // don't override 'speaking' state
+    // Don't override 'thinking' state while model is generating
+    if (useAppStore.getState().streamState.isStreaming) return;
     if (s === 'monitoring') setJarvisState('listening');
     else if (s === 'capturing') setJarvisState('listening');
     else if (s === 'transcribing') setJarvisState('thinking');
@@ -429,7 +436,9 @@ export function CommandCenter() {
       resetStream();
       abortRef.current = null;
       if (speechEnabled && sentenceBufferRef.current.trim()) { queueSentenceTTS(sentenceBufferRef.current); sentenceBufferRef.current = ''; }
-      if (!playingRef.current) setJarvisState(voiceAlwaysOn ? 'listening' : 'idle');
+      // Only go idle if TTS isn't playing — playNextAudio handles the
+      // final state transition when all audio finishes.
+      if (!playingRef.current) setJarvisState('idle');
       voiceInitiatedRef.current = false;
       fetchSavings().then((data) => useAppStore.getState().setSavings(data)).catch(() => {});
     }

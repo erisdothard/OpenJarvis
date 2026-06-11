@@ -70,13 +70,16 @@ export function VoiceAgent() {
   const [available, setAvailable] = useState<boolean | null>(null);
   const checkedRef = useRef(false);
 
-  // Check LiveKit availability once on mount
+  // Check LiveKit availability once on mount — verify the token endpoint
+  // actually works, not just that env vars are set (the SDK may be missing).
   useEffect(() => {
     if (checkedRef.current) return;
     checkedRef.current = true;
-    fetch(`${getBase()}/v1/livekit/health`)
-      .then((r) => r.json())
-      .then((d) => setAvailable(d.available))
+    fetch(`${getBase()}/v1/livekit/token?room=probe`)
+      .then((r) => {
+        // 501 = SDK not installed, 503 = env vars missing
+        setAvailable(r.ok);
+      })
       .catch(() => setAvailable(false));
   }, []);
 
