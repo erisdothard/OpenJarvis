@@ -1,20 +1,34 @@
-"""FastAPI routes for the morning digest."""
+"""FastAPI routes for the daily digest (morning, midday, evening)."""
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from openjarvis.agents.digest_store import DigestStore
 from openjarvis.cli.digest_cmd import (
     _cancel_scheduler_tasks,
+    _create_all_scheduler_tasks,
     _create_scheduler_task,
     _save_digest_schedule,
 )
 from openjarvis.core.config import load_config
+
+VALID_DIGEST_TYPES = ("morning", "midday", "evening")
+
+
+def _current_digest_type() -> str:
+    """Determine which digest type is most relevant based on time of day."""
+    hour = datetime.now().hour
+    if hour < 10:
+        return "morning"
+    if hour < 16:
+        return "midday"
+    return "evening"
 
 
 class ScheduleUpdate(BaseModel):
@@ -22,6 +36,7 @@ class ScheduleUpdate(BaseModel):
 
     enabled: bool
     cron: Optional[str] = None
+    schedules: Optional[dict[str, str]] = None
 
 
 def create_digest_router(*, db_path: str = "") -> APIRouter:
@@ -32,9 +47,16 @@ def create_digest_router(*, db_path: str = "") -> APIRouter:
     _digest_tz = getattr(cfg.digest, "timezone", "America/Chicago")
 
     @router.get("")
-    async def get_digest():
-        """Return the latest digest artifact."""
-        artifact = store.get_today(timezone_name=_digest_tz)
+    async def get_digest(
+        type: Optional[str] = Query(None, description="Digest type: morning, midday, evening"),
+    ):
+        """Return the latest digest artifact, auto-selecting type by time of day."""
+        digest_type = type if type in VALID_DIGEST_TYPES else ""
+
+        # Try the requested/auto type first, fall back to any today's digest
+        artifact = store.get_today(timezone_name=_digest_tz, digest_type=digest_type)
+        if artifact is None and digest_type:
+            artifact = store.get_today(timezone_name=_digest_tz)
         if artifact is None:
             raise HTTPException(status_code=404, detail="No digest for today")
         return {
@@ -44,15 +66,22 @@ def create_digest_router(*, db_path: str = "") -> APIRouter:
             "generated_at": artifact.generated_at.isoformat(),
             "model_used": artifact.model_used,
             "voice_used": artifact.voice_used,
+            "digest_type": artifact.digest_type,
             "audio_available": (
                 artifact.audio_path.exists() if artifact.audio_path.name else False
             ),
+            "follow_up_questions": artifact.follow_up_questions,
         }
 
     @router.get("/audio")
-    async def get_digest_audio():
+    async def get_digest_audio(
+        type: Optional[str] = Query(None, description="Digest type"),
+    ):
         """Stream the digest audio file."""
-        artifact = store.get_today(timezone_name=_digest_tz)
+        digest_type = type if type in VALID_DIGEST_TYPES else ""
+        artifact = store.get_today(timezone_name=_digest_tz, digest_type=digest_type)
+        if artifact is None:
+            artifact = store.get_today(timezone_name=_digest_tz)
         if artifact is None:
             raise HTTPException(status_code=404, detail="No digest for today")
         if not artifact.audio_path.exists():
@@ -60,31 +89,43 @@ def create_digest_router(*, db_path: str = "") -> APIRouter:
         return FileResponse(
             str(artifact.audio_path),
             media_type="audio/mpeg",
-            filename="digest.mp3",
+            filename=f"digest-{artifact.digest_type}.mp3",
         )
 
     @router.post("/generate")
-    async def generate_digest():
-        """Force re-generation of the digest."""
+    async def generate_digest(
+        type: Optional[str] = Query(None, description="Digest type to generate"),
+    ):
+        """Force re-generation of a digest."""
+        digest_type = type if type in VALID_DIGEST_TYPES else _current_digest_type()
+        label = {"morning": "morning", "midday": "midday", "evening": "evening"}[
+            digest_type
+        ]
         try:
             from openjarvis.sdk import Jarvis
 
             with Jarvis() as j:
-                result = j.ask("Generate my morning digest", agent="morning_digest")
-            return {"status": "ok", "text": result}
+                result = j.ask(
+                    f"Generate my {label} digest", agent="morning_digest"
+                )
+            return {"status": "ok", "digest_type": digest_type, "text": result}
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @router.get("/history")
-    async def get_digest_history():
+    async def get_digest_history(
+        type: Optional[str] = Query(None, description="Filter by digest type"),
+    ):
         """Return past digests."""
-        history = store.history(limit=10)
+        digest_type = type if type in VALID_DIGEST_TYPES else ""
+        history = store.history(limit=10, digest_type=digest_type)
         return [
             {
                 "text": a.text[:200],
                 "generated_at": a.generated_at.isoformat(),
                 "model_used": a.model_used,
                 "voice_used": a.voice_used,
+                "digest_type": a.digest_type,
             }
             for a in history
         ]
@@ -93,9 +134,11 @@ def create_digest_router(*, db_path: str = "") -> APIRouter:
     async def get_schedule():
         """Return the current digest schedule configuration."""
         cfg = load_config()
+        schedules = getattr(cfg.digest, "schedules", {})
         return {
             "enabled": cfg.digest.enabled,
             "cron": cfg.digest.schedule,
+            "schedules": schedules if schedules else {"morning": cfg.digest.schedule},
         }
 
     @router.post("/schedule")
@@ -114,13 +157,17 @@ def create_digest_router(*, db_path: str = "") -> APIRouter:
 
         # Sync with the TaskScheduler
         if body.enabled:
-            _create_scheduler_task(cron)
+            if body.schedules:
+                _create_all_scheduler_tasks(body.schedules)
+            else:
+                _create_scheduler_task(cron)
         else:
             _cancel_scheduler_tasks()
 
         return {
             "enabled": body.enabled,
             "cron": cron,
+            "schedules": body.schedules,
         }
 
     return router

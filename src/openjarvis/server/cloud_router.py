@@ -165,10 +165,65 @@ def get_fallback_model(failed_model: str) -> str | None:
         return None
     keys = _load_keys()
     for fb_provider, fb_model in _FALLBACK_CHAIN[provider]:
+        # Skip providers that are also in cooldown
+        if _is_provider_cooled_down(fb_provider):
+            continue
         key_names = _PROVIDER_KEY_NAMES.get(fb_provider, [])
         if any(keys.get(k) for k in key_names):
             return fb_model
     return None
+
+
+# ---------------------------------------------------------------------------
+# Provider cooldown — avoids wasting a round-trip on every request when a
+# provider is known to be down (billing, auth, rate-limit).  Cooldown is
+# short (5 min) so recovery is automatic once credits are added.
+# ---------------------------------------------------------------------------
+
+import time as _time
+import logging as _logging
+
+_cooldown_log = _logging.getLogger("openjarvis.cloud_router")
+
+# {provider_name: expiry_timestamp}
+_provider_cooldowns: dict[str, float] = {}
+_COOLDOWN_SECONDS = 90  # 90 seconds
+
+
+def mark_provider_down(provider: str) -> None:
+    """Record that a provider is temporarily unavailable."""
+    _provider_cooldowns[provider] = _time.monotonic() + _COOLDOWN_SECONDS
+    _cooldown_log.warning(
+        "Provider %s marked down for %ds", provider, _COOLDOWN_SECONDS,
+    )
+
+
+def _is_provider_cooled_down(provider: str) -> bool:
+    expiry = _provider_cooldowns.get(provider)
+    if expiry is None:
+        return False
+    if _time.monotonic() >= expiry:
+        del _provider_cooldowns[provider]
+        return False
+    return True
+
+
+def resolve_model_with_fallback(model: str) -> tuple[str, str | None]:
+    """Pre-check: if the model's provider is in cooldown, return the
+    fallback immediately.  Returns ``(effective_model, original_or_None)``.
+
+    If no cooldown is active, returns ``(model, None)`` — use the model
+    as-is.  If a fallback was selected, returns
+    ``(fallback_model, original_model)`` so callers can notify the user.
+    """
+    provider = get_provider(model)
+    if not provider or not _is_provider_cooled_down(provider):
+        return model, None
+    fallback = get_fallback_model(model)
+    if fallback:
+        return fallback, model
+    # No fallback available — try the original anyway (cooldown may be stale)
+    return model, None
 
 
 # ---------------------------------------------------------------------------

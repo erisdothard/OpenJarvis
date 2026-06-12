@@ -1,7 +1,13 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useAppStore } from '../lib/store';
-import { fetchDigest, generateDigest, getDigestAudioUrl, synthesizeSpeech } from '../lib/api';
-import type { DigestData } from '../lib/api';
+import {
+  fetchDigest,
+  generateDigest,
+  getDigestAudioUrl,
+  synthesizeSpeech,
+  currentDigestType,
+} from '../lib/api';
+import type { DigestData, DigestType } from '../lib/api';
 
 function getGreeting(): string {
   const hour = new Date().getHours();
@@ -11,7 +17,27 @@ function getGreeting(): string {
   return 'Good evening, sir.';
 }
 
-/** Check if digest is stale (generated on a different calendar day or older than 6 hours). */
+function getLiveDateTimeAnnouncement(): string {
+  const now = new Date();
+  const day = now.toLocaleDateString('en-US', { weekday: 'long' });
+  const month = now.toLocaleDateString('en-US', { month: 'long' });
+  const date = now.getDate();
+  const year = now.getFullYear();
+  const time = now.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+  return `It is ${day}, ${month} ${date}, ${year}. The time is ${time}.`;
+}
+
+function getDigestLabel(type: DigestType): string {
+  if (type === 'midday') return "Here's your midday update.";
+  if (type === 'evening') return "Here's your evening wrap-up.";
+  return "Here's your situation.";
+}
+
+/** Check if digest is stale. Morning/evening: 6h window. Midday: 4h window. */
 function isStale(digest: DigestData): boolean {
   try {
     const generated = new Date(digest.generated_at);
@@ -21,7 +47,9 @@ function isStale(digest: DigestData): boolean {
       generated.getMonth() === now.getMonth() &&
       generated.getDate() === now.getDate();
     if (!sameDay) return true;
-    return now.getTime() - generated.getTime() > 6 * 60 * 60 * 1000;
+    // Midday updates have a shorter freshness window
+    const maxAge = digest.digest_type === 'midday' ? 4 : 6;
+    return now.getTime() - generated.getTime() > maxAge * 60 * 60 * 1000;
   } catch {
     return true;
   }
@@ -139,24 +167,62 @@ export function useBriefing(): BriefingControls {
     [playNextAudio, setBriefingStatus],
   );
 
-  /** Play the briefing: use pre-generated audio if available, else TTS. */
+  /** Play the briefing: always announce live date/time first, then digest. */
   const play = useCallback(() => {
-    if (hasAudioRef.current) {
-      playDigestAudio();
-    } else if (digestTextRef.current) {
-      speakText(digestTextRef.current);
-    }
-  }, [playDigestAudio, speakText]);
+    interrupt();
+    setBriefingStatus('speaking');
+    const announcement = getLiveDateTimeAnnouncement();
+
+    synthesizeSpeech(announcement)
+      .then((blob) => {
+        if (!mountedRef.current) return;
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audioQueueRef.current.push(audio);
+
+        if (hasAudioRef.current) {
+          // Queue pre-generated digest audio after the announcement
+          const digestAudio = new Audio(getDigestAudioUrl());
+          audioQueueRef.current.push(digestAudio);
+        } else if (digestTextRef.current) {
+          // Queue sentence-level TTS after the announcement
+          const sentences = digestTextRef.current.match(/[^.!?]+[.!?]+/g) || [digestTextRef.current];
+          for (const sentence of sentences) {
+            const clean = sentence.replace(/[#*_~`>\[\]]/g, '').replace(/\n+/g, ' ').trim();
+            if (!clean) continue;
+            synthesizeSpeech(clean)
+              .then((b) => {
+                if (!mountedRef.current) return;
+                const u = URL.createObjectURL(b);
+                audioQueueRef.current.push(new Audio(u));
+                if (!playingRef.current) playNextAudio();
+              })
+              .catch(() => {});
+          }
+        }
+
+        if (!playingRef.current) playNextAudio();
+      })
+      .catch(() => {
+        // If date/time TTS fails, fall back to original behavior
+        if (hasAudioRef.current) {
+          playDigestAudio();
+        } else if (digestTextRef.current) {
+          speakText(digestTextRef.current);
+        }
+      });
+  }, [interrupt, playDigestAudio, speakText, playNextAudio, setBriefingStatus]);
 
   const loadBriefing = useCallback(async () => {
     setBriefingStatus('loading');
 
-    let digest = await fetchDigest();
+    const digestType = currentDigestType();
+    let digest = await fetchDigest(digestType);
 
     // If no digest or stale, generate one
     if (!digest || isStale(digest)) {
       setBriefingStatus('generating');
-      digest = await generateDigest();
+      digest = await generateDigest(digestType);
     }
 
     if (!mountedRef.current) return;
@@ -172,30 +238,28 @@ export function useBriefing(): BriefingControls {
     hasAudioRef.current = !!digest.audio_available;
 
     const greeting = getGreeting();
+    const label = getDigestLabel(digest.digest_type || digestType);
     // Strip any existing greeting from the digest text to avoid duplication
     const digestText = digest.text.replace(
       /^Good\s+(morning|afternoon|evening|night),?\s*(sir\.?)?\s*/i,
       '',
     );
-    const fullText = `${greeting} Here's your situation.\n\n${digestText}`;
-    setBriefingText(fullText);
+    const fullText = `${greeting} ${label}\n\n${digestText}`;
+    setBriefingText(fullText, digest.follow_up_questions || []);
     digestTextRef.current = fullText;
 
-    // Auto-play only once per session
+    // Auto-play only once per session per digest type
+    const sessionKey = `${SESSION_KEY}-${digest.digest_type || digestType}`;
     const today = new Date().toDateString();
-    const alreadyPlayed = sessionStorage.getItem(SESSION_KEY) === today;
+    const alreadyPlayed = sessionStorage.getItem(sessionKey) === today;
     if (speechEnabled && !alreadyPlayed) {
-      sessionStorage.setItem(SESSION_KEY, today);
+      sessionStorage.setItem(sessionKey, today);
       setTimeout(() => {
         if (!mountedRef.current) return;
-        if (hasAudioRef.current) {
-          playDigestAudio();
-        } else {
-          speakText(fullText);
-        }
+        play();
       }, 500);
     }
-  }, [speechEnabled, setBriefingStatus, setBriefingText, speakText, playDigestAudio]);
+  }, [speechEnabled, setBriefingStatus, setBriefingText, play]);
 
   // Run once on mount
   useEffect(() => {

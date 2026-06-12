@@ -1,7 +1,11 @@
-"""Morning Digest Agent — synthesizes a daily briefing from multiple sources.
+"""Daily Digest Agent — synthesizes morning, midday, and evening briefings.
 
 Thin orchestrator that delegates to digest_collect (data fetching),
 the LLM (narrative synthesis), and text_to_speech (audio generation).
+Supports three digest types:
+  - morning: full daily briefing (priorities, schedule, messages, health, world)
+  - midday: status update (new messages, schedule changes, quick check-in)
+  - evening: circle-back (uncompleted items, carry-forward to tomorrow, day summary)
 """
 
 from __future__ import annotations
@@ -36,6 +40,9 @@ class MorningDigestAgent(ToolUsingAgent):
 
     agent_id = "morning_digest"
 
+    # Valid digest types
+    DIGEST_TYPES = ("morning", "midday", "evening")
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         # Extract digest-specific kwargs before passing to parent
         self._persona = kwargs.pop("persona", "jarvis")
@@ -46,9 +53,10 @@ class MorningDigestAgent(ToolUsingAgent):
         self._timezone = kwargs.pop("timezone", "America/Los_Angeles")
         self._voice_id = kwargs.pop("voice_id", "")
         self._voice_speed = kwargs.pop("voice_speed", 1.0)
-        self._tts_backend = kwargs.pop("tts_backend", "cartesia")
+        self._tts_backend = kwargs.pop("tts_backend", "openai_tts")
         self._digest_store_path = kwargs.pop("digest_store_path", "")
         self._honorific = kwargs.pop("honorific", "sir")
+        self._digest_type = kwargs.pop("digest_type", "morning")
         super().__init__(*args, **kwargs)
 
     def _build_system_prompt(self) -> str:
@@ -59,8 +67,9 @@ class MorningDigestAgent(ToolUsingAgent):
         except Exception:
             now = datetime.now()
         honorific = getattr(self, "_honorific", "sir")
+        digest_type = getattr(self, "_digest_type", "morning")
 
-        return (
+        preamble = (
             f"{persona_text}\n\n"
             f"Today is {now.strftime('%A, %B %d, %Y')}. "
             f"The time is {now.strftime('%I:%M %p')} in {self._timezone}.\n"
@@ -68,6 +77,32 @@ class MorningDigestAgent(ToolUsingAgent):
             "You receive structured data from the user's connected services. "
             "The data has ALREADY been collected — it appears in the user "
             "message. You do NOT fetch anything yourself.\n\n"
+        )
+
+        rules = (
+            "ABSOLUTE RULES (violations are unacceptable):\n"
+            "- ONLY facts from the data. Zero hallucination.\n"
+            "- NEVER mention disconnected or unavailable sources.\n"
+            "- NEVER state raw health numbers. Say 'your sleep was solid' "
+            "NOT 'heart rate 56 bpm' or 'HRV 53' or '6000 steps' or "
+            "'readiness 82'. Interpret, never enumerate.\n"
+            "- NEVER describe actions you are taking.\n"
+            "- Acknowledge every source that returned data, even briefly.\n"
+            "- No markdown, emojis, bullets, or headers.\n"
+        )
+
+        if digest_type == "midday":
+            structure = self._midday_prompt()
+        elif digest_type == "evening":
+            structure = self._evening_prompt()
+        else:
+            structure = self._morning_prompt()
+
+        return preamble + structure + "\n\n" + rules
+
+    def _morning_prompt(self) -> str:
+        """Full morning briefing structure."""
+        return (
             "Produce a 2-4 minute spoken briefing in DECREASING order of "
             "importance:\n\n"
             "1. GREETING + PRIORITIES — Open with the honorific and "
@@ -94,16 +129,59 @@ class MorningDigestAgent(ToolUsingAgent):
             "5. WORLD — Weather forecast, top news (AI/tech, business, "
             "general). Skip if no data.\n\n"
             "6. CLOSING — One forward-looking sentence with the honorific.\n\n"
-            "ABSOLUTE RULES (violations are unacceptable):\n"
-            "- ONLY facts from the data. Zero hallucination.\n"
-            "- NEVER mention disconnected or unavailable sources.\n"
-            "- NEVER state raw health numbers. Say 'your sleep was solid' "
-            "NOT 'heart rate 56 bpm' or 'HRV 53' or '6000 steps' or "
-            "'readiness 82'. Interpret, never enumerate.\n"
-            "- NEVER describe actions you are taking.\n"
-            "- Acknowledge every source that returned data, even briefly.\n"
-            "- No markdown, emojis, bullets, or headers.\n"
             "- STRICT LIMIT: 200 words. Be concise."
+        )
+
+    def _midday_prompt(self) -> str:
+        """Midday status check-in structure."""
+        return (
+            "Produce a short midday status update (60-90 seconds spoken). "
+            "This is an INTERACTIVE check-in, NOT a one-way briefing.\n\n"
+            "1. GREETING — Brief afternoon greeting with the honorific.\n\n"
+            "2. NEW SINCE MORNING — Only items that arrived SINCE the morning "
+            "briefing. New messages, new emails, schedule changes. Do NOT "
+            "repeat items from the morning.\n\n"
+            "3. AFTERNOON SCHEDULE — Remaining events for today. Time context "
+            "relative to now ('You have a call in 2 hours').\n\n"
+            "4. QUICK FLAGS — Anything time-sensitive that needs attention "
+            "before end of day. Deadlines approaching, unanswered urgent "
+            "messages.\n\n"
+            "5. GAP CHECK — End with 2-3 short, specific questions to surface "
+            "things the connectors may have missed. These should probe for:\n"
+            "  - Tasks from meetings or conversations that aren't in any "
+            "tool yet ('Did anything come out of your 10 AM call?')\n"
+            "  - Ad-hoc commitments or promises made verbally\n"
+            "  - Priorities that shifted since the morning\n"
+            "  - Anything blocking progress that hasn't surfaced in messages\n"
+            "Make the questions SPECIFIC to what's on today's schedule and "
+            "what's been happening — not generic. Reference actual calendar "
+            "events, contacts, or projects from the data.\n\n"
+            "FORMAT: After the spoken briefing text, output the questions on "
+            "separate lines prefixed with 'Q: ' — these will be extracted "
+            "and shown as interactive prompts.\n\n"
+            "- STRICT LIMIT: 150 words (including questions). Keep the status "
+            "update tight so the questions have room."
+        )
+
+    def _evening_prompt(self) -> str:
+        """Evening circle-back and carry-forward structure."""
+        return (
+            "Produce an evening circle-back briefing (90-120 seconds spoken). "
+            "Focus on closure and carry-forward.\n\n"
+            "1. GREETING — Evening greeting with the honorific.\n\n"
+            "2. DAY IN REVIEW — Brief summary of what happened today: "
+            "meetings attended, messages handled, tasks completed. Keep it "
+            "factual and concise.\n\n"
+            "3. STILL OPEN — Items that did NOT get completed or responded to "
+            "today. Unanswered important emails, missed tasks, pending items. "
+            "Be specific about what's outstanding.\n\n"
+            "4. CARRY-FORWARD — What needs to go on tomorrow's plate. Frame "
+            "it as 'Tomorrow you'll want to...' Connect related items.\n\n"
+            "5. TOMORROW PREVIEW — If there are calendar events for tomorrow, "
+            "mention the first one or two so the user knows what they're "
+            "waking up to.\n\n"
+            "6. CLOSING — Wind-down tone. One sentence with the honorific.\n\n"
+            "- STRICT LIMIT: 150 words. Concise wrap-up, not a full briefing."
         )
 
     def _resolve_sources(self) -> List[str]:
@@ -131,49 +209,137 @@ class MorningDigestAgent(ToolUsingAgent):
             sources.update(section_sources)
         return list(sources)
 
+    def _hours_back_for_type(self) -> float:
+        """Return lookback window in hours based on digest type."""
+        if self._digest_type == "midday":
+            return 8  # Since morning (~6 AM to ~12 PM with buffer)
+        if self._digest_type == "evening":
+            return 14  # Full day context for carry-forward
+        return 24  # Morning: full 24h
+
+    def _user_message_for_type(self, collected_data: str) -> str:
+        """Build the user prompt based on digest type."""
+        base_rules = (
+            "- For health: say 'solid', 'improving', 'dipped' "
+            "— NEVER say any number (no 82, no 56, no 6000)\n"
+            "- Do NOT invent reasons for health changes\n"
+            "- Do NOT mention disconnected sources\n"
+            "- Do NOT repeat the greeting in your closing\n"
+            "- Use the honorific ONLY 2-3 times total\n"
+            "- Skip notifications from the user themselves"
+        )
+
+        if self._digest_type == "midday":
+            return (
+                f"Here is the collected data from my sources:\n\n"
+                f"{collected_data}\n\n"
+                f"Synthesize my midday check-in. Remember:\n"
+                f"- Focus on NEW items since this morning\n"
+                f"- Highlight anything time-sensitive for this afternoon\n"
+                f"- Keep the status update part brief\n"
+                f"- End with 2-3 SPECIFIC questions prefixed with 'Q: ' to "
+                f"catch things that didn't come through connectors\n"
+                f"- Make questions reference actual events, contacts, or "
+                f"projects from the data — not generic\n"
+                f"{base_rules}\n"
+                f"- STRICT LIMIT: 150 words maximum (including questions)"
+            )
+
+        if self._digest_type == "evening":
+            return (
+                f"Here is the collected data from my sources:\n\n"
+                f"{collected_data}\n\n"
+                f"Synthesize my evening circle-back. Remember:\n"
+                f"- Focus on what's STILL OPEN — unanswered emails, incomplete tasks\n"
+                f"- Identify what carries forward to tomorrow\n"
+                f"- If there are tomorrow's calendar events, preview them\n"
+                f"- Wind-down tone — the day is ending\n"
+                f"{base_rules}\n"
+                f"- STRICT LIMIT: 150 words maximum"
+            )
+
+        # Morning (default)
+        return (
+            f"Here is the collected data from my sources:\n\n"
+            f"{collected_data}\n\n"
+            f"Synthesize my morning briefing. Remember:\n"
+            f"- Priority-first, connect related items\n"
+            f"{base_rules}\n"
+            f"- STRICT LIMIT: 200-250 words maximum"
+        )
+
+    @staticmethod
+    def _extract_questions(text: str) -> tuple:
+        """Extract 'Q: ...' lines from narrative, return (clean_text, questions)."""
+        import re
+
+        lines = text.split("\n")
+        questions: List[str] = []
+        body_lines: List[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            # Match "Q: ...", "Q1: ...", "Q. ...", etc.
+            match = re.match(r"^Q\d*[:.]\s*(.+)", stripped)
+            if match:
+                questions.append(match.group(1).strip())
+            else:
+                body_lines.append(line)
+
+        clean_text = "\n".join(body_lines).strip()
+        return clean_text, questions
+
     def run(
         self,
         input: str,
         context: Optional[AgentContext] = None,
         **kwargs: Any,
     ) -> AgentResult:
+        # Allow runtime override of digest_type via kwargs or input
+        digest_type = kwargs.pop("digest_type", None)
+        if digest_type and digest_type in self.DIGEST_TYPES:
+            self._digest_type = digest_type
+        elif "midday" in input.lower():
+            self._digest_type = "midday"
+        elif "evening" in input.lower() or "circle" in input.lower():
+            self._digest_type = "evening"
+
         self._emit_turn_start(input)
 
         # Step 1: Collect data from connectors
         sources = self._resolve_sources()
+        hours_back = self._hours_back_for_type()
+
+        # Evening digest also fetches unacted items and tomorrow's calendar
+        collect_args: dict = {"sources": sources, "hours_back": hours_back}
+        if self._digest_type == "evening":
+            collect_args["unacted_only"] = True
+        if self._digest_type == "midday":
+            collect_args["unacted_only"] = True
+
         collect_call = ToolCall(
             id="digest-collect-1",
             name="digest_collect",
-            arguments=json.dumps({"sources": sources, "hours_back": 24}),
+            arguments=json.dumps(collect_args),
         )
         collect_result = self._executor.execute(collect_call)
         collected_data = collect_result.content
 
         # Step 2: Synthesize narrative via LLM
         system_prompt = self._build_system_prompt()
+        user_content = self._user_message_for_type(collected_data)
         messages = [
             Message(role=Role.SYSTEM, content=system_prompt),
-            Message(
-                role=Role.USER,
-                content=(
-                    f"Here is the collected data from my sources:\n\n"
-                    f"{collected_data}\n\n"
-                    f"Synthesize my morning briefing. Remember:\n"
-                    f"- Priority-first, connect related items\n"
-                    f"- For health: say 'solid', 'improving', 'dipped' "
-                    f"— NEVER say any number (no 82, no 56, no 6000)\n"
-                    f"- Do NOT invent reasons for health changes\n"
-                    f"- Do NOT mention disconnected sources\n"
-                    f"- Do NOT repeat the greeting in your closing\n"
-                    f"- Use the honorific ONLY 2-3 times total\n"
-                    f"- Skip notifications from the user themselves\n"
-                    f"- STRICT LIMIT: 200-250 words maximum"
-                ),
-            ),
+            Message(role=Role.USER, content=user_content),
         ]
 
         result = self._generate(messages)
         narrative = self._strip_think_tags(result.get("content", ""))
+
+        # Step 2a: Extract follow-up questions from midday narratives
+        follow_up_questions: List[str] = []
+        if self._digest_type == "midday":
+            narrative, follow_up_questions = self._extract_questions(narrative)
 
         # Step 2b: Self-evaluate and optionally regenerate
         quality_score = 0.0
@@ -200,6 +366,10 @@ class MorningDigestAgent(ToolUsingAgent):
                 )
                 result = self._generate(messages)
                 narrative = self._strip_think_tags(result.get("content", ""))
+                if self._digest_type == "midday":
+                    narrative, follow_up_questions = self._extract_questions(
+                        narrative
+                    )
         except Exception:  # noqa: BLE001
             pass  # Evaluator failure shouldn't block digest delivery
 
@@ -242,6 +412,8 @@ class MorningDigestAgent(ToolUsingAgent):
             voice_used=self._voice_id,
             quality_score=quality_score,
             evaluator_feedback=evaluator_feedback,
+            digest_type=self._digest_type,
+            follow_up_questions=follow_up_questions,
         )
 
         store = DigestStore(db_path=self._digest_store_path)
@@ -256,5 +428,6 @@ class MorningDigestAgent(ToolUsingAgent):
             metadata={
                 "audio_path": audio_path,
                 "sources_used": sources,
+                "follow_up_questions": follow_up_questions,
             },
         )

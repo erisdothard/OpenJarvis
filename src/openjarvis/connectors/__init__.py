@@ -157,3 +157,8 @@ try:
     import openjarvis.connectors.linkedin  # noqa: F401
 except ImportError:
     pass
+
+try:
+    import openjarvis.connectors.twitter  # noqa: F401
+except ImportError:
+    pass

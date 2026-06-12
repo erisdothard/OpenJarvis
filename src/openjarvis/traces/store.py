@@ -7,6 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, List, Optional
 
+from openjarvis.core.db import open_db
 from openjarvis.core.events import Event, EventBus, EventType
 from openjarvis.core.types import StepType, Trace, TraceStep
 
@@ -86,12 +87,7 @@ class TraceStore:
             from openjarvis.security.file_utils import secure_create
 
             secure_create(Path(self._db_path))
-        # check_same_thread=False is safe with WAL mode.  The
-        # AgenticRunner dispatches agent work to a ThreadPoolExecutor
-        # (for Playwright compat), so trace writes may originate from
-        # a different thread than the one that opened the connection.
-        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn = open_db(self._db_path)
         self._conn.execute(_CREATE_TRACES)
         self._conn.execute(_CREATE_STEPS)
         self._conn.execute(_CREATE_FTS)

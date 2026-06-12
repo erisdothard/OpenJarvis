@@ -58,7 +58,7 @@ function ApiKeyInput({ storageKey, placeholder }: { storageKey: string; placehol
   return (
     <div className="flex items-center gap-2">
       <input type="password" value={value} onChange={e => save(e.target.value)} placeholder={placeholder}
-        className="w-48 px-2 py-1 rounded text-xs"
+        className="w-full sm:w-48 px-2 py-1 rounded text-xs"
         style={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }} />
       {saved && <span className="text-[10px]" style={{ color: 'var(--color-success)' }}>Saved</span>}
     </div>
@@ -97,14 +97,14 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function SettingRow({ label, description, children }: { label: string; description?: string; children: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-between py-3" style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
-      <div>
+    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-4 py-3" style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
+      <div className="shrink-0">
         <div className="text-sm" style={{ color: 'var(--color-text)' }}>{label}</div>
         {description && (
           <div className="text-xs mt-0.5" style={{ color: 'var(--color-text-tertiary)' }}>{description}</div>
         )}
       </div>
-      <div>{children}</div>
+      <div className="sm:ml-auto">{children}</div>
     </div>
   );
 }
@@ -254,7 +254,7 @@ export function SettingsPage() {
   };
 
   return (
-    <div className="flex-1 overflow-y-auto px-6 py-10">
+    <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-6 sm:py-10" style={{ paddingBottom: 'calc(24px + env(safe-area-inset-bottom, 0px))' }}>
       <div className="max-w-2xl mx-auto">
         <header className="mb-6">
           <div className="flex items-center justify-between gap-3">
@@ -337,7 +337,7 @@ export function SettingsPage() {
                 value={settings.apiUrl}
                 onChange={(e) => { updateSettings({ apiUrl: e.target.value }); showSaved(); }}
                 placeholder="http://localhost:8000"
-                className="text-sm px-3 py-1.5 rounded-lg outline-none w-56"
+                className="text-sm px-3 py-1.5 rounded-lg outline-none w-full sm:w-56"
                 style={{
                   background: 'var(--color-bg-secondary)',
                   color: 'var(--color-text)',
@@ -352,7 +352,7 @@ export function SettingsPage() {
                 onChange={(e) => { updateSettings({ apiKey: e.target.value }); showSaved(); }}
                 placeholder="OPENJARVIS_API_KEY"
                 autoComplete="off"
-                className="text-sm px-3 py-1.5 rounded-lg outline-none w-56"
+                className="text-sm px-3 py-1.5 rounded-lg outline-none w-full sm:w-56"
                 style={{
                   background: 'var(--color-bg-secondary)',
                   color: 'var(--color-text)',
@@ -368,7 +368,7 @@ export function SettingsPage() {
               <select
                 value={srcKind}
                 onChange={(e) => { setSrcKind(e.target.value as InferenceSource['kind']); setSrcMsg(''); }}
-                className="text-sm px-3 py-1.5 rounded-lg outline-none w-56"
+                className="text-sm px-3 py-1.5 rounded-lg outline-none w-full sm:w-56"
                 style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)', border: '1px solid var(--color-border)' }}
               >
                 <option value="ollama">Bundled Ollama (default)</option>
@@ -379,17 +379,17 @@ export function SettingsPage() {
               <>
                 <SettingRow label="Server URL" description="e.g. LM Studio: http://localhost:1234/v1">
                   <input type="text" value={customHost} onChange={(e) => { setCustomHost(e.target.value); setSrcMsg(''); }} placeholder="http://localhost:1234/v1"
-                    className="text-sm px-3 py-1.5 rounded-lg outline-none w-56"
+                    className="text-sm px-3 py-1.5 rounded-lg outline-none w-full sm:w-56"
                     style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)', border: '1px solid var(--color-border)' }} />
                 </SettingRow>
                 <SettingRow label="Model" description="Model id served by your endpoint">
                   <input type="text" value={customModel} onChange={(e) => { setCustomModel(e.target.value); setSrcMsg(''); }} placeholder="qwen2.5-7b-instruct"
-                    className="text-sm px-3 py-1.5 rounded-lg outline-none w-56"
+                    className="text-sm px-3 py-1.5 rounded-lg outline-none w-full sm:w-56"
                     style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)', border: '1px solid var(--color-border)' }} />
                 </SettingRow>
                 <SettingRow label="Server type" description="OpenAI-compatible engine">
                   <select value={customEngine} onChange={(e) => { setCustomEngine(e.target.value); setSrcMsg(''); }}
-                    className="text-sm px-3 py-1.5 rounded-lg outline-none w-56"
+                    className="text-sm px-3 py-1.5 rounded-lg outline-none w-full sm:w-56"
                     style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)', border: '1px solid var(--color-border)' }}>
                     <option value="lmstudio">LM Studio</option>
                     <option value="vllm">vLLM</option>
@@ -400,7 +400,7 @@ export function SettingsPage() {
                 </SettingRow>
                 <SettingRow label="API key (optional)" description="Only if your server requires one">
                   <input type="password" value={customKey} onChange={(e) => { setCustomKey(e.target.value); setSrcMsg(''); }} placeholder="leave blank if none"
-                    className="text-sm px-3 py-1.5 rounded-lg outline-none w-56"
+                    className="text-sm px-3 py-1.5 rounded-lg outline-none w-full sm:w-56"
                     style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)', border: '1px solid var(--color-border)' }} />
                 </SettingRow>
               </>
@@ -627,6 +627,28 @@ export function SettingsPage() {
                 See the <a href="https://open-jarvis.github.io/OpenJarvis/user-guide/tools/" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-accent)' }}>documentation</a> for details.
               </div>
             )}
+            <SettingRow
+              label="Voice Always-On"
+              description={settings.speechEnabled ? 'Keep the microphone active for hands-free interaction' : 'Enable Speech-to-Text first'}
+            >
+              <button
+                onClick={() => { updateSettings({ voiceAlwaysOn: !settings.voiceAlwaysOn }); showSaved(); }}
+                className="relative w-11 h-6 rounded-full transition-colors cursor-pointer"
+                disabled={!settings.speechEnabled}
+                style={{
+                  background: settings.voiceAlwaysOn && settings.speechEnabled ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                  opacity: settings.speechEnabled ? 1 : 0.4,
+                }}
+              >
+                <span
+                  className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full transition-transform bg-white"
+                  style={{
+                    transform: settings.voiceAlwaysOn && settings.speechEnabled ? 'translateX(20px)' : 'translateX(0)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                  }}
+                />
+              </button>
+            </SettingRow>
           </Section>
 
           {/* Data */}

@@ -4,6 +4,7 @@ import { useAppStore } from '../../lib/store';
 
 interface Props {
   searchQuery: string;
+  onNavigate?: () => void;
 }
 
 function formatRelativeTime(timestamp: number): string {
@@ -18,12 +19,13 @@ function formatRelativeTime(timestamp: number): string {
   return new Date(timestamp).toLocaleDateString();
 }
 
-export function ConversationList({ searchQuery }: Props) {
+export function ConversationList({ searchQuery, onNavigate }: Props) {
   const navigate = useNavigate();
   const conversations = useAppStore((s) => s.conversations);
   const activeId = useAppStore((s) => s.activeId);
   const selectConversation = useAppStore((s) => s.selectConversation);
   const deleteConversation = useAppStore((s) => s.deleteConversation);
+  const setSidebarOpen = useAppStore((s) => s.setSidebarOpen);
 
   const filtered = searchQuery
     ? conversations.filter((c) =>
@@ -61,8 +63,10 @@ export function ConversationList({ searchQuery }: Props) {
               onClick={() => {
                 selectConversation(conv.id);
                 navigate('/chat');
+                if (onNavigate) onNavigate();
+                else if (window.innerWidth < 768) setSidebarOpen(false);
               }}
-              className="flex-1 text-left px-3 py-2 min-w-0 cursor-pointer"
+              className="flex-1 text-left px-3 py-2.5 min-w-0 cursor-pointer"
             >
               <div className="text-[13px] truncate" style={{
                 color: isActive ? 'var(--color-text-bright)' : 'var(--color-text-secondary)',
@@ -79,7 +83,7 @@ export function ConversationList({ searchQuery }: Props) {
                 e.stopPropagation();
                 deleteConversation(conv.id);
               }}
-              className="p-1.5 mr-1.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer rounded-md"
+              className="p-1.5 mr-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity cursor-pointer rounded-md"
               style={{ color: 'var(--color-text-tertiary)' }}
               onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--color-error)')}
               onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--color-text-tertiary)')}

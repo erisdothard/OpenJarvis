@@ -34,13 +34,23 @@ export function Sidebar() {
   const deepResearch = useAppStore((s) => s.deepResearch);
   const messages = useAppStore((s) => s.messages);
 
+  const setSidebarOpen = useAppStore((s) => s.setSidebarOpen);
+
+  // Close sidebar on mobile after navigation
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+  const closeSidebarOnMobile = () => {
+    if (isMobile) setSidebarOpen(false);
+  };
+
   const handleNewChat = () => {
     if (messages.length === 0) {
       navigate('/chat');
+      closeSidebarOnMobile();
       return;
     }
     createConversation(selectedModel);
     navigate('/chat');
+    closeSidebarOnMobile();
   };
 
   const navItems = [
@@ -63,14 +73,19 @@ export function Sidebar() {
       {!sidebarOpen && (
         <button
           onClick={toggleSidebar}
-          className="fixed top-3 left-3 z-30 p-2 cursor-pointer rounded-lg transition-colors"
+          className="fixed top-3 left-3 z-30 p-2.5 cursor-pointer rounded-lg transition-colors"
           style={{
             color: 'var(--color-text-secondary)',
             background: 'var(--color-bg-secondary)',
             border: '1px solid var(--color-border)',
+            minWidth: 44,
+            minHeight: 44,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
           }}
         >
-          <PanelLeft size={16} />
+          <PanelLeft size={18} />
         </button>
       )}
 
@@ -157,8 +172,8 @@ export function Sidebar() {
               return (
                 <button
                   key={item.path}
-                  onClick={() => navigate(item.path)}
-                  className={`sidebar-nav-item relative flex items-center gap-2.5 px-3 py-2 text-left w-full cursor-pointer ${isActive ? 'is-active' : ''}`}
+                  onClick={() => { navigate(item.path); closeSidebarOnMobile(); }}
+                  className={`sidebar-nav-item relative flex items-center gap-2.5 px-3 py-2.5 text-left w-full cursor-pointer ${isActive ? 'is-active' : ''}`}
                 >
                   {isActive && <span aria-hidden="true" className="chroma-active-bar" />}
                   <item.icon size={15} style={{ color: isActive ? 'var(--color-accent)' : 'var(--color-text-secondary)' }} />

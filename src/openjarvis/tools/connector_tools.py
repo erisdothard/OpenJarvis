@@ -729,7 +729,7 @@ class FacebookCreatePost(BaseTool):
             name="facebook_create_post",
             description=(
                 "Publish a post to the Syntra AI Facebook page. "
-                "Optionally include a link to share."
+                "Only use when Eris explicitly says to publish."
             ),
             parameters={
                 "type": "object",
@@ -746,6 +746,7 @@ class FacebookCreatePost(BaseTool):
                 "required": ["message"],
             },
             category="social",
+            requires_confirmation=True,
         )
 
     def execute(self, **params: Any) -> ToolResult:
@@ -821,7 +822,7 @@ class InstagramCreatePost(BaseTool):
             name="instagram_create_post",
             description=(
                 "Publish a photo post to the Syntra AI Instagram account. "
-                "Requires a publicly accessible image URL."
+                "Only use when Eris explicitly says to publish."
             ),
             parameters={
                 "type": "object",
@@ -838,6 +839,7 @@ class InstagramCreatePost(BaseTool):
                 "required": ["image_url"],
             },
             category="social",
+            requires_confirmation=True,
         )
 
     def execute(self, **params: Any) -> ToolResult:
@@ -853,7 +855,10 @@ class LinkedInCreatePost(BaseTool):
         return ToolSpec(
             name="linkedin_create_post",
             description=(
-                "Publish a text post to Eris Dothard's LinkedIn profile."
+                "Publish a text post to Eris Dothard's REAL LinkedIn profile. "
+                "WARNING: This posts LIVE content. Only use when Eris explicitly "
+                "says to publish/post. For generating draft content, use "
+                "'linkedin_daily' or 'content_draft' instead."
             ),
             parameters={
                 "type": "object",
@@ -866,6 +871,7 @@ class LinkedInCreatePost(BaseTool):
                 "required": ["commentary"],
             },
             category="social",
+            requires_confirmation=True,
         )
 
     def execute(self, **params: Any) -> ToolResult:

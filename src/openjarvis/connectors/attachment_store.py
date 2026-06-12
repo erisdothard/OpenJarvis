@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from openjarvis.core.db import open_db
 
 # ---------------------------------------------------------------------------
 # DDL
@@ -59,8 +60,7 @@ class AttachmentStore:
         secure_mkdir(self._base_dir)
 
         db_path = self._base_dir / "attachments.db"
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = open_db(db_path, row_factory=True)
         self._setup()
 
     # ------------------------------------------------------------------
@@ -68,7 +68,6 @@ class AttachmentStore:
     # ------------------------------------------------------------------
 
     def _setup(self) -> None:
-        self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.execute(f"{_CREATE_TABLE}")
         self._conn.commit()
 

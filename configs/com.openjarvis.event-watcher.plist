@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  OpenJarvis Event Watcher — launchd user agent
+  Runs every 5 minutes to check Calendar + Reminders and send iMessage alerts.
+
+  INSTALL:
+    mkdir -p ~/.openjarvis/logs
+    cp configs/com.openjarvis.event-watcher.plist ~/Library/LaunchAgents/
+    # Edit ProgramArguments below to match your Python path (must have pyobjc + httpx)
+    launchctl load ~/Library/LaunchAgents/com.openjarvis.event-watcher.plist
+
+  VERIFY:
+    launchctl list | grep openjarvis
+
+  STOP:
+    launchctl unload ~/Library/LaunchAgents/com.openjarvis.event-watcher.plist
+
+  NOTE: On first run, macOS will prompt for Calendar and Reminders access.
+        Grant access in System Settings > Privacy & Security.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.openjarvis.event-watcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Update this to your Python path: which python3 -->
+        <string>/Users/erisdothard/OpenJarvis/.venv/bin/python3</string>
+        <string>/Users/erisdothard/OpenJarvis/scripts/event_watcher.py</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/erisdothard/.openjarvis/logs/event-watcher.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/erisdothard/.openjarvis/logs/event-watcher.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

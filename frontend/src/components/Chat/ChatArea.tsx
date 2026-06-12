@@ -62,10 +62,11 @@ export function ChatArea() {
       <div className="flex items-center justify-end px-4 py-2 shrink-0">
         <button
           onClick={toggleSystemPanel}
-          className="sidebar-icon-btn p-1.5 cursor-pointer"
+          className="sidebar-icon-btn p-2.5 cursor-pointer"
           title={`${systemPanelOpen ? 'Hide' : 'Show'} system panel`}
+          style={{ minWidth: 44, minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
         >
-          <PanelIcon size={15} />
+          <PanelIcon size={16} />
         </button>
       </div>
 
@@ -108,15 +109,15 @@ export function ChatArea() {
               <Sparkles size={18} style={{ color: 'var(--color-accent)' }} />
             </div>
 
-            <h2 className="text-2xl font-semibold mb-2 tracking-tight" style={{ color: 'var(--color-text-bright)' }}>
+            <h2 className="text-xl sm:text-2xl font-semibold mb-2 tracking-tight" style={{ color: 'var(--color-text-bright)' }}>
               {getGreeting()}
             </h2>
-            <p className="text-[15px] text-center max-w-md mb-8" style={{ color: 'var(--color-text-secondary)', lineHeight: 1.6 }}>
+            <p className="text-[14px] sm:text-[15px] text-center max-w-md mb-6 sm:mb-8 px-4" style={{ color: 'var(--color-text-secondary)', lineHeight: 1.6 }}>
               What would you like to work on?
             </p>
 
             {/* Suggestion chips */}
-            <div className="grid grid-cols-2 gap-2.5 max-w-md w-full">
+            <div className="grid grid-cols-2 gap-2 sm:gap-2.5 max-w-md w-full px-2 sm:px-0">
               {SUGGESTIONS.map((s) => (
                 <button
                   key={s.label}
@@ -139,7 +140,7 @@ export function ChatArea() {
             </div>
           </div>
         ) : (
-          <div className="max-w-[var(--chat-max-width)] mx-auto px-4 py-6">
+          <div className="max-w-[var(--chat-max-width)] mx-auto px-3 sm:px-4 py-4 sm:py-6">
             {messages.map((msg, i) => {
               const isLastAssistant = i === messages.length - 1 && msg.role === 'assistant';
               return (

@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from openjarvis.core.db import open_db
 from openjarvis.core.events import Event, EventBus, EventType
 from openjarvis.core.types import TelemetryRecord
 
@@ -137,7 +138,7 @@ class TelemetryStore:
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
-        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        self._conn = open_db(db_path)
         self._conn.execute(_CREATE_TABLE)
         self._conn.execute(_CREATE_MINING_STATS_TABLE)
         self._conn.commit()

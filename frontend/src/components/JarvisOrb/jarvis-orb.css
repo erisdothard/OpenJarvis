@@ -1,0 +1,254 @@
+/*
+ * JarvisOrb — State-reactive animated presence
+ * Inherits the platinum visual language, extends with audio reactivity.
+ * All animations use compositor-friendly properties (transform, opacity, filter).
+ */
+
+.jarvis-orb-wrapper {
+  --audio-level: 0;
+  position: relative;
+  width: 210px;
+  height: 210px;
+  margin-bottom: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Breath ring (outermost ambient pulse) ── */
+.orb-breath {
+  position: absolute;
+  inset: -20px;
+  border-radius: 50%;
+  border: 1px solid rgba(225, 228, 240, 0.08);
+  pointer-events: none;
+}
+
+/* ── Audio-reactive glow ── */
+.orb-glow {
+  position: absolute;
+  inset: -12px;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: calc(0.15 + var(--audio-level) * 0.6);
+  transition: opacity 60ms linear;
+}
+
+.orb-glow[data-state="idle"] {
+  box-shadow: 0 0 20px rgba(156, 160, 180, 0.15);
+}
+.orb-glow[data-state="listening"] {
+  box-shadow:
+    0 0 calc(15px + var(--audio-level) * 35px) rgba(61, 242, 221, 0.35),
+    0 0 calc(40px + var(--audio-level) * 60px) rgba(61, 242, 221, 0.12);
+}
+.orb-glow[data-state="thinking"] {
+  box-shadow:
+    0 0 20px rgba(255, 179, 0, 0.25),
+    0 0 50px rgba(255, 179, 0, 0.08);
+  animation: orb-think-pulse 1.2s ease-in-out infinite;
+}
+.orb-glow[data-state="speaking"] {
+  box-shadow:
+    0 0 calc(15px + var(--audio-level) * 40px) rgba(61, 242, 221, 0.3),
+    0 0 calc(30px + var(--audio-level) * 50px) rgba(140, 0, 255, 0.15);
+}
+
+/* ── Main orb body ── */
+.orb-body {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  animation: pt-corefloat 6s ease-in-out infinite;
+}
+
+/* ── Spinning rim ── */
+.orb-rim {
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  filter: blur(8px);
+  animation: pt-spinhue 9s linear infinite;
+  transition: opacity 0.4s ease;
+}
+
+.orb-rim[data-state="idle"] {
+  background: conic-gradient(
+    from var(--pt-spin, 0deg),
+    #9a9cae, #f2f3f8, #70727f, #e6e8f0, #9a9cae
+  );
+  opacity: 0.5;
+}
+.orb-rim[data-state="listening"] {
+  background: conic-gradient(
+    from var(--pt-spin, 0deg),
+    #3df2dd, #00e5ff, #3df2dd, #00bcd4, #3df2dd
+  );
+  opacity: calc(0.6 + var(--audio-level) * 0.4);
+  animation-duration: 4s;
+}
+.orb-rim[data-state="thinking"] {
+  background: conic-gradient(
+    from var(--pt-spin, 0deg),
+    #ffb300, #ff6d00, #ffb300, #ffd54f, #ffb300
+  );
+  opacity: 0.8;
+  animation-duration: 2s;
+}
+.orb-rim[data-state="speaking"] {
+  background: conic-gradient(
+    from var(--pt-spin, 0deg),
+    #3df2dd, #8c00ff, #ff00aa, #3df2dd, #00e5ff, #3df2dd
+  );
+  opacity: calc(0.6 + var(--audio-level) * 0.4);
+  animation-duration: 5s;
+}
+
+/* ── Platinum ball ── */
+.orb-ball {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: url('/platinum-core.png') center / cover;
+}
+
+/* ── Gloss highlight ── */
+.orb-gloss {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 33% 27%,
+    rgba(255, 255, 255, 0.9) 0%,
+    transparent 22%
+  );
+  mix-blend-mode: screen;
+}
+
+/* ── Sparkles ── */
+.orb-sparkle {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+  opacity: 0;
+  animation: pt-twinkle 3.4s ease-in-out infinite;
+}
+.orb-sparkle::before,
+.orb-sparkle::after {
+  content: '';
+  position: absolute;
+  background: #fff;
+  left: 50%;
+  top: 50%;
+}
+.orb-sparkle::before {
+  width: 1.5px;
+  height: 100%;
+  transform: translate(-50%, -50%);
+}
+.orb-sparkle::after {
+  height: 1.5px;
+  width: 100%;
+  transform: translate(-50%, -50%);
+}
+.orb-s1 { top: 4%; left: 72%; }
+.orb-s2 { top: 62%; left: 2%; animation-delay: 1.2s; transform: scale(0.7); }
+.orb-s3 { top: 84%; left: 84%; animation-delay: 2.1s; transform: scale(0.5); }
+
+/* ── State indicator dot ── */
+.orb-indicator {
+  position: absolute;
+  bottom: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  z-index: 2;
+}
+.orb-indicator[data-state="idle"] {
+  background: #5c5e68;
+}
+.orb-indicator[data-state="listening"] {
+  background: #3df2dd;
+  box-shadow: 0 0 10px rgba(61, 242, 221, 0.9);
+  animation: pt-beat 1.5s ease-in-out infinite;
+}
+.orb-indicator[data-state="thinking"] {
+  background: #ffb300;
+  box-shadow: 0 0 10px rgba(255, 179, 0, 0.9);
+  animation: pt-beat 0.8s ease-in-out infinite;
+}
+.orb-indicator[data-state="speaking"] {
+  background: linear-gradient(135deg, #3df2dd, #8c00ff);
+  box-shadow: 0 0 10px rgba(61, 242, 221, 0.7);
+}
+
+/* ── Floating state label ── */
+.orb-state-label {
+  position: absolute;
+  bottom: -28px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  z-index: 2;
+}
+.orb-state-label[data-state="listening"] {
+  color: #3df2dd;
+  text-shadow: 0 0 12px rgba(61, 242, 221, 0.6);
+}
+.orb-state-label[data-state="thinking"] {
+  color: #ffb300;
+  text-shadow: 0 0 12px rgba(255, 179, 0, 0.5);
+}
+.orb-state-label[data-state="speaking"] {
+  color: #c8b0ff;
+  text-shadow: 0 0 12px rgba(140, 0, 255, 0.5);
+}
+
+/* ── Thinking pulse keyframe ── */
+@keyframes orb-think-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.6; }
+}
+
+/* ── Mobile scale ── */
+@media (max-width: 640px) {
+  .jarvis-orb-wrapper {
+    width: 150px;
+    height: 150px;
+    margin-bottom: 18px;
+  }
+  .orb-breath {
+    inset: -14px;
+  }
+  .orb-glow {
+    inset: -8px;
+  }
+  .orb-state-label {
+    bottom: -22px;
+    font-size: 9px;
+  }
+  .orb-indicator {
+    bottom: -6px;
+    width: 6px;
+    height: 6px;
+  }
+}
+
+/* ── Reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  .orb-body,
+  .orb-rim,
+  .orb-sparkle,
+  .orb-breath,
+  .orb-indicator {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

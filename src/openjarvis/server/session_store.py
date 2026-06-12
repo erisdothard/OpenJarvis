@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from openjarvis.core.db import open_db
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +27,7 @@ class SessionStore:
         from openjarvis.security.file_utils import secure_create
 
         secure_create(Path(db_path))
-        self._db = sqlite3.connect(db_path, check_same_thread=False)
-        self._db.row_factory = sqlite3.Row
+        self._db = open_db(db_path, row_factory=True)
         self._create_tables()
 
     # ------------------------------------------------------------------

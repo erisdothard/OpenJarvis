@@ -90,8 +90,8 @@ backend = "faster-whisper"                  # Local STT (no API key needed)
 model = "base"                              # Whisper model: tiny, base, small, medium, large-v3
 device = "auto"                             # auto, cpu, cuda
 compute_type = "int8"                       # int8 for Apple Silicon (float16 not supported)
-tts_backend = "cartesia"                    # Cartesia Sonic — fast, high-quality
-tts_voice_id = "a0e99841-438c-4a64-b679-ae501e7d6091"  # British Butler (Jarvis)
+tts_backend = "elevenlabs"                  # ElevenLabs — high-quality voice synthesis
+tts_voice_id = "onwK4e9ZLuTAKqWW03F9"     # Custom ElevenLabs voice
 tts_speed = 1.0
 tts_language = "en"
 
@@ -100,13 +100,19 @@ tts_language = "en"
 # ═══════════════════════════════════════════════════════════════
 [digest]
 enabled = true
-schedule = "0 6 * * *"                       # 6:00 AM daily
+schedule = "0 6 * * *"                       # Legacy: morning-only fallback
 timezone = "America/Chicago"                 # Nashville, TN = Central Time
 persona = "eris"                             # Custom persona
 honorific = "Eris"                           # Use first name, not "sir"
 voice_speed = 1.0
-tts_backend = "cartesia"
+tts_backend = "elevenlabs"
+voice_id = "onwK4e9ZLuTAKqWW03F9"
 sections = ["messages", "calendar", "health", "world", "social", "music"]
+
+[digest.schedules]
+morning = "0 6 * * *"                        # 6:00 AM — full daily briefing
+midday  = "0 12 * * *"                       # 12:00 PM — status update
+evening = "0 18 * * *"                       # 6:00 PM — circle-back & carry-forward
 
 [digest.messages]
 sources = ["gmail", "imessage", "outlook", "slack", "github_notifications"]

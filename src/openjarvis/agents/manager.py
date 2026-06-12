@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from openjarvis.core.db import open_db
+
 logger = logging.getLogger(__name__)
 
 _CREATE_AGENTS = """\
@@ -106,10 +108,7 @@ class AgentManager:
 
     def __init__(self, db_path: str, *, clear_stale_running: bool = False) -> None:
         self._db_path = str(db_path)
-        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn = open_db(db_path, row_factory=True, foreign_keys=True)
         self._conn.execute(_CREATE_AGENTS)
         self._conn.execute(_CREATE_TASKS)
         self._conn.execute(_CREATE_BINDINGS)

@@ -35,7 +35,7 @@ export function MicButton({ state, onClick, disabled, reason }: MicButtonProps) 
       <button
         onClick={onClick}
         disabled={isInactive}
-        className="p-2 rounded-xl transition-all shrink-0"
+        className="p-2.5 rounded-xl transition-all shrink-0"
         style={{
           background: state === 'recording'
             ? 'var(--color-error)'
@@ -48,6 +48,11 @@ export function MicButton({ state, onClick, disabled, reason }: MicButtonProps) 
           cursor: isInactive ? 'default' : 'pointer',
           opacity: isInactive ? 0.35 : 1,
           animation: state === 'recording' ? 'pulse 1.5s ease-in-out infinite' : 'none',
+          minWidth: 44,
+          minHeight: 44,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
         }}
       >
         {state === 'transcribing' ? (

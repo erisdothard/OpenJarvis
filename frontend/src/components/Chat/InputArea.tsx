@@ -1,9 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Send, Square, Paperclip, Search } from 'lucide-react';
+import { Send, Square, Paperclip, Search, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore, generateId } from '../../lib/store';
 import { streamChat, streamResearch } from '../../lib/sse';
-import { fetchSavings, getBase, synthesizeSpeech } from '../../lib/api';
+import { apiFetch, fetchSavings, getBase, synthesizeSpeech } from '../../lib/api';
 import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { MicButton } from './MicButton';
 import { useSpeech } from '../../hooks/useSpeech';
@@ -99,6 +99,48 @@ export function InputArea() {
 
   const pendingVoiceRef = useRef(false);
   const voiceInitiatedRef = useRef(false);
+
+  // File attachments
+  const [attachedFiles, setAttachedFiles] = useState<{ name: string; chunks: number }[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    e.target.value = ''; // reset so same file can be re-selected
+
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      for (const f of Array.from(files)) {
+        formData.append('files[]', f);
+      }
+      const res = await apiFetch('/v1/connectors/upload/ingest/files', {
+        method: 'POST',
+        body: formData,
+      });
+      if (!res.ok) {
+        const err = await res.text().catch(() => res.statusText);
+        throw new Error(err);
+      }
+      const data = await res.json();
+      const newFiles = Array.from(files).map((f) => ({
+        name: f.name,
+        chunks: Math.ceil((data.chunks_added || 0) / files.length),
+      }));
+      setAttachedFiles((prev) => [...prev, ...newFiles]);
+      toast.success(`Indexed ${data.chunks_added} chunks from ${files.length} file${files.length > 1 ? 's' : ''}`);
+    } catch (err: any) {
+      toast.error(`Upload failed: ${err?.message || 'unknown error'}`);
+    } finally {
+      setUploading(false);
+    }
+  }, []);
+
+  const removeFile = useCallback((index: number) => {
+    setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
+  }, []);
 
   // Audio queue for sentence-level TTS playback
   const audioQueueRef = useRef<HTMLAudioElement[]>([]);
@@ -274,13 +316,21 @@ export function InputArea() {
       convId = createConversation(selectedModel);
     }
 
+    // If files were attached, prepend context so the LLM uses knowledge_search
+    let finalContent = content;
+    if (attachedFiles.length > 0) {
+      const names = attachedFiles.map((f) => f.name).join(', ');
+      finalContent = `[Attached files: ${names}] Use the knowledge_search tool to find their contents.\n\n${content}`;
+    }
+
     const userMsg: ChatMessage = {
       id: generateId(),
       role: 'user',
-      content,
+      content: finalContent,
       timestamp: Date.now(),
     };
     addMessage(convId, userMsg);
+    setAttachedFiles([]);
 
     // Build API messages before adding assistant placeholder
     const currentMessages = useAppStore.getState().messages;
@@ -672,7 +722,7 @@ export function InputArea() {
   };
 
   return (
-    <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
+    <div className="px-3 sm:px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%', paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' }}>
       {/* Deep Research toggle */}
       <div className="mb-2 flex flex-col gap-1">
         <div className="flex items-center gap-2">
@@ -704,6 +754,44 @@ export function InputArea() {
         )}
       </div>
 
+      {/* Attached files */}
+      {attachedFiles.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          {attachedFiles.map((f, i) => (
+            <span
+              key={`${f.name}-${i}`}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-[12px] rounded-lg"
+              style={{
+                background: 'rgba(255, 255, 255, 0.05)',
+                border: '1px solid rgba(255, 255, 255, 0.08)',
+                color: 'var(--color-text-secondary)',
+              }}
+            >
+              <Paperclip size={11} style={{ opacity: 0.5 }} />
+              {f.name}
+              <button
+                type="button"
+                onClick={() => removeFile(i)}
+                className="ml-0.5 p-0.5 rounded hover:bg-white/10 transition-colors cursor-pointer"
+                title="Remove file"
+              >
+                <X size={10} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept=".txt,.md,.pdf,.docx,.csv,.json,.py,.ts,.tsx,.js,.jsx"
+        onChange={handleFileSelect}
+        className="hidden"
+      />
+
       {/* Input bar */}
       <div
         className="chroma-border flex items-center gap-2 px-4 py-3 transition-shadow rounded-2xl"
@@ -719,7 +807,7 @@ export function InputArea() {
           onKeyDown={handleKeyDown}
           placeholder={selectedModel ? 'Message Jarvis...' : 'Select a model first (⌘K)...'}
           rows={1}
-          className="flex-1 bg-transparent outline-none resize-none text-[15px] leading-relaxed"
+          className="flex-1 bg-transparent outline-none resize-none text-[16px] leading-relaxed"
           style={{
             color: 'var(--color-text-bright)',
             maxHeight: '200px',
@@ -729,17 +817,32 @@ export function InputArea() {
         {streamState.isStreaming ? (
           <button
             onClick={stopStreaming}
-            className="p-2.5 transition-colors shrink-0 cursor-pointer rounded-xl"
+            className="p-3 transition-colors shrink-0 cursor-pointer rounded-xl"
             style={{
               background: 'var(--color-error)',
               color: '#fff',
+              minWidth: 44,
+              minHeight: 44,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
             }}
             title="Stop generating"
           >
-            <Square size={14} />
+            <Square size={16} />
           </button>
         ) : (
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              title="Attach files"
+              className="p-2.5 shrink-0 cursor-pointer rounded-xl transition-colors hover:bg-white/5 disabled:opacity-30 disabled:cursor-default"
+              style={{ color: 'var(--color-text-tertiary)', minWidth: 44, minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            >
+              <Paperclip size={16} />
+            </button>
             <MicButton
               state={speechState}
               onClick={handleMicClick}
@@ -751,15 +854,16 @@ export function InputArea() {
               disabled={!input.trim() || modelLoading || !selectedModel}
               title={selectedModel ? 'Send' : 'Select a model first (⌘K)'}
               className="chroma-button-primary p-2.5 shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default rounded-xl"
+              style={{ minWidth: 44, minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
             >
-              <Send size={14} />
+              <Send size={16} />
             </button>
           </div>
         )}
       </div>
 
-      {/* Hint */}
-      <div className="flex items-center justify-center mt-2 text-[11px]" style={{ color: 'var(--color-text-tertiary)' }}>
+      {/* Hint — hidden on mobile (touch users don't need keyboard shortcuts) */}
+      <div className="hidden sm:flex items-center justify-center mt-2 text-[11px]" style={{ color: 'var(--color-text-tertiary)' }}>
         <span>
           <kbd className="font-mono text-[10px]">Enter</kbd> to send &middot;{' '}
           <kbd className="font-mono text-[10px]">Shift+Enter</kbd> new line

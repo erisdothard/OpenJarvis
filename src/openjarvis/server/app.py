@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import pathlib
 import time
@@ -15,11 +16,13 @@ from openjarvis.server.api_routes import include_all_routes
 from openjarvis.server.comparison import comparison_router
 from openjarvis.server.connectors_router import create_connectors_router
 from openjarvis.server.dashboard import dashboard_router
+from openjarvis.server.glance_routes import glance_router
 from openjarvis.server.digest_routes import create_digest_router
 from openjarvis.server.livekit_routes import router as livekit_router
 from openjarvis.server.research_router import router as research_router
 from openjarvis.server.routes import router
 from openjarvis.server.upload_router import router as upload_router
+from openjarvis.server.voice_ws import router as voice_ws_router
 
 logger = logging.getLogger(__name__)
 
@@ -310,6 +313,17 @@ def create_app(
     app.include_router(research_router)
     app.include_router(analytics_router)
     app.include_router(livekit_router)
+    app.include_router(glance_router)
+    app.include_router(voice_ws_router)
+
+    # Event-driven alert endpoint
+    try:
+        from openjarvis.server.alert_routes import alert_router
+
+        app.include_router(alert_router)
+    except Exception as exc:
+        logger.debug("Alert routes init skipped: %s", exc)
+
     include_all_routes(app)
 
     # Desktop alerting on agent failures
@@ -360,6 +374,88 @@ def create_app(
             app.include_router(webhook_router)
         except Exception as exc:
             logger.debug("Webhook routes init skipped: %s", exc)
+
+    # -- Gmail Pub/Sub push listener ----------------------------------------
+    @app.on_event("startup")
+    async def _start_gmail_push() -> None:
+        cfg = config if config is not None else load_config()
+        if not cfg.alerts.enabled:
+            return
+        gp = cfg.alerts.gmail_push
+        if not (gp.gcp_project and gp.topic and gp.subscription):
+            return
+        try:
+            from openjarvis.server.gmail_push import (
+                setup_gmail_watch,
+                start_gmail_listener,
+            )
+
+            topic_full = f"projects/{gp.gcp_project}/topics/{gp.topic}"
+            history_id = setup_gmail_watch(topic_full)
+            if history_id:
+                sa_path = gp.service_account or ""
+                if sa_path and not Path(sa_path).is_absolute():
+                    sa_path = str(DEFAULT_CONFIG_DIR / "connectors" / sa_path)
+                start_gmail_listener(
+                    gcp_project=gp.gcp_project,
+                    subscription=gp.subscription,
+                    phone=cfg.alerts.phone,
+                    important_senders=gp.important_senders,
+                    service_account_path=sa_path or None,
+                )
+                # Schedule watch renewal every 6 days
+                async def _renew_loop() -> None:
+                    while True:
+                        await asyncio.sleep(6 * 24 * 3600)
+                        try:
+                            setup_gmail_watch(topic_full)
+                        except Exception:
+                            pass
+
+                app.state._gmail_watch_task = asyncio.create_task(_renew_loop())
+        except Exception as exc:
+            logger.debug("Gmail push listener init skipped: %s", exc)
+
+    @app.on_event("shutdown")
+    async def _stop_gmail_push() -> None:
+        task = getattr(app.state, "_gmail_watch_task", None)
+        if task is not None:
+            task.cancel()
+        try:
+            from openjarvis.server.gmail_push import stop_gmail_listener
+
+            stop_gmail_listener()
+        except Exception:
+            pass
+
+    # -- WAL checkpoint background task ------------------------------------
+    # Periodically checkpoints all SQLite WAL files to prevent unbounded
+    # WAL growth and keep read performance stable.
+    @app.on_event("startup")
+    async def _start_wal_checkpointer() -> None:
+        from openjarvis.core.config import DEFAULT_CONFIG_DIR
+        from openjarvis.core.db import checkpoint_all
+
+        async def _loop() -> None:
+            while True:
+                await asyncio.sleep(300)  # every 5 minutes
+                try:
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None, checkpoint_all, str(DEFAULT_CONFIG_DIR)
+                    )
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    pass
+
+        app.state._checkpoint_task = asyncio.create_task(_loop())
+
+    @app.on_event("shutdown")
+    async def _stop_wal_checkpointer() -> None:
+        task = getattr(app.state, "_checkpoint_task", None)
+        if task is not None:
+            task.cancel()
 
     # Serve static frontend assets if the static/ directory exists
     static_dir = pathlib.Path(__file__).parent / "static"

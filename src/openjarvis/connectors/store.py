@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from openjarvis.core.db import open_db
 from openjarvis.core.events import EventType, get_event_bus
 from openjarvis.core.registry import MemoryRegistry
 from openjarvis.tools.storage._stubs import MemoryBackend, RetrievalResult
@@ -168,8 +169,7 @@ class KnowledgeStore(MemoryBackend):
 
             secure_create(Path(self._db_path))
 
-        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = open_db(self._db_path, row_factory=True, foreign_keys=True)
         self._setup()
 
     def __enter__(self) -> "KnowledgeStore":
@@ -184,8 +184,6 @@ class KnowledgeStore(MemoryBackend):
 
     def _setup(self) -> None:
         """Create tables, FTS virtual table, triggers and indexes."""
-        self._conn.execute("PRAGMA journal_mode=WAL;")
-        self._conn.execute("PRAGMA foreign_keys=ON;")
         self._conn.executescript(
             _CREATE_MAIN_TABLE + _CREATE_FTS_TABLE + _CREATE_TRIGGERS
         )

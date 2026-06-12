@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Send, Square, Play, VolumeX, RefreshCw, Loader2 } from 'lucide-react';
+import { Send, Square, Play, VolumeX, RefreshCw, Loader2, ChevronDown } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore, generateId } from '../lib/store';
 import {
@@ -17,7 +17,11 @@ import { streamChat, streamResearch } from '../lib/sse';
 import { useBriefing } from '../hooks/useBriefing';
 import { useSpeech } from '../hooks/useSpeech';
 import { useAlwaysOnVoice } from '../hooks/useAlwaysOnVoice';
+import { useVoiceStream } from '../hooks/useVoiceStream';
 import { JarvisOrb } from '../components/JarvisOrb/JarvisOrb';
+import { SituationalPanel } from '../components/CommandCenter/SituationalPanel';
+import { TelemetryStrip } from '../components/CommandCenter/TelemetryStrip';
+import { SocialPanel } from '../components/CommandCenter/SocialPanel';
 import type { ManagedAgent, PendingApproval } from '../lib/api';
 import type {
   ChatMessage,
@@ -68,7 +72,7 @@ export function CommandCenter() {
   const isStreaming = useAppStore((s) => s.streamState.isStreaming);
   const streamState = useAppStore((s) => s.streamState);
   const briefing = useAppStore((s) => s.briefing);
-  // const savings = useAppStore((s) => s.savings);
+  // savings is read by TelemetryStrip from the store directly
   const messages = useAppStore((s) => s.messages);
   const activeId = useAppStore((s) => s.activeId);
   const selectedModel = useAppStore((s) => s.selectedModel);
@@ -92,6 +96,7 @@ export function CommandCenter() {
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [processing, setProcessing] = useState<Record<string, boolean>>({});
 
+  const [agentsOpen, setAgentsOpen] = useState(false);
   const [input, setInput] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -110,7 +115,95 @@ export function CommandCenter() {
   const voiceInitiatedRef = useRef(false);
   const pendingVoiceRef = useRef(false);
 
-  const { interrupt, refresh: refreshBriefing, play: playBriefing } = useBriefing();
+  // ── WebSocket voice stream (replaces useSpeech + TTS when server VAD available) ──
+  const voiceConvRef = useRef<string | null>(null);
+  const voiceContentRef = useRef('');
+  const voiceToolsRef = useRef<ToolCallInfo[]>([]);
+  const wsAutoRef = useRef(false); // true when auto-connected via always-on
+
+  const voiceStream = useVoiceStream({
+    onTranscript: useCallback((text: string, isFinal: boolean) => {
+      if (!isFinal || !text?.trim()) return;
+      const model = useAppStore.getState().selectedModel;
+      if (!model) return;
+      const store = useAppStore.getState();
+      const convId = store.activeId || store.createConversation(model);
+      voiceConvRef.current = convId;
+      voiceContentRef.current = '';
+      voiceToolsRef.current = [];
+
+      store.addMessage(convId, { id: generateId(), role: 'user', content: text.trim(), timestamp: Date.now() });
+      store.addMessage(convId, { id: generateId(), role: 'assistant', content: '', timestamp: Date.now() });
+      store.setStreamState({ isStreaming: true, phase: 'Generating...', elapsedMs: 0, activeToolCalls: [], content: '' });
+    }, []),
+    onLlmDelta: useCallback((delta: string) => {
+      const convId = voiceConvRef.current;
+      if (!convId) return;
+      voiceContentRef.current += delta;
+      const store = useAppStore.getState();
+      store.setStreamState({ content: voiceContentRef.current, phase: '' });
+      store.updateLastAssistant(convId, voiceContentRef.current, voiceToolsRef.current.length > 0 ? [...voiceToolsRef.current] : undefined);
+    }, []),
+    onLlmDone: useCallback((content: string) => {
+      const convId = voiceConvRef.current;
+      if (!convId) return;
+      const final = content || voiceContentRef.current;
+      const store = useAppStore.getState();
+      store.updateLastAssistant(convId, final, voiceToolsRef.current.length > 0 ? voiceToolsRef.current : undefined);
+      store.resetStream();
+      voiceConvRef.current = null;
+    }, []),
+    onStateChange: useCallback((s: string) => {
+      const store = useAppStore.getState();
+      if (s === 'idle' || s === 'disconnected') store.setJarvisState('idle');
+      else if (s === 'listening') store.setJarvisState('listening');
+      else if (s === 'transcribing' || s === 'thinking') store.setJarvisState('thinking');
+      else if (s === 'speaking') store.setJarvisState('speaking');
+    }, []),
+    onAudioLevel: useCallback((level: number) => {
+      useAppStore.getState().setAudioLevel(level);
+    }, []),
+    onToolStart: useCallback((tool: string, args: string) => {
+      const tc: ToolCallInfo = { id: generateId(), tool, arguments: args, status: 'running' };
+      voiceToolsRef.current.push(tc);
+      const convId = voiceConvRef.current;
+      if (!convId) return;
+      const store = useAppStore.getState();
+      store.setStreamState({ phase: `Calling ${tool}...`, activeToolCalls: [...voiceToolsRef.current] });
+      store.updateLastAssistant(convId, voiceContentRef.current, [...voiceToolsRef.current]);
+    }, []),
+    onToolEnd: useCallback((tool: string, success: boolean, latency: number) => {
+      const tc = voiceToolsRef.current.find((t) => t.tool === tool && t.status === 'running');
+      if (tc) { tc.status = success ? 'success' : 'error'; tc.latency = latency; }
+      const convId = voiceConvRef.current;
+      if (!convId) return;
+      const store = useAppStore.getState();
+      store.setStreamState({ phase: 'Generating...', activeToolCalls: [...voiceToolsRef.current] });
+      store.updateLastAssistant(convId, voiceContentRef.current, [...voiceToolsRef.current]);
+    }, []),
+    onError: useCallback((detail: string) => {
+      toast.error(detail);
+    }, []),
+  });
+
+  const wsVoiceActive = voiceStream.state !== 'disconnected';
+
+  // Auto-connect WS voice when always-on is enabled and server supports it
+  useEffect(() => {
+    if (voiceStream.available && speechEnabled && voiceAlwaysOn && !wsVoiceActive) {
+      wsAutoRef.current = true;
+      voiceStream.connect({ model: selectedModel }).catch(() => { wsAutoRef.current = false; });
+    }
+    if ((!speechEnabled || !voiceAlwaysOn) && wsAutoRef.current && wsVoiceActive) {
+      wsAutoRef.current = false;
+      voiceStream.disconnect();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voiceStream.available, speechEnabled, voiceAlwaysOn, selectedModel]);
+
+  const { interrupt: interruptBriefing, refresh: refreshBriefing, play: playBriefing } = useBriefing();
+  // Alias interrupt from useBriefing to avoid clash with voiceStream.interrupt
+  const interrupt = interruptBriefing;
 
   // ── Data polling ──
   const refresh = useCallback(async () => {
@@ -124,6 +217,7 @@ export function CommandCenter() {
 
   useEffect(() => {
     fetchServerInfo().then((info) => useAppStore.getState().setServerInfo(info)).catch(() => {});
+    fetchSavings().then((data) => useAppStore.getState().setSavings(data)).catch(() => {});
     refresh();
     const id = setInterval(refresh, 15000);
     return () => clearInterval(id);
@@ -220,6 +314,8 @@ export function CommandCenter() {
   interruptAudioRef.current = interruptAudio;
 
   const queueSentenceTTS = useCallback((sentence: string) => {
+    // Skip client-side TTS when WebSocket voice pipeline handles audio server-side
+    if (wsVoiceActive) return;
     const clean = sentence.replace(/```[\s\S]*?```/g, 'code block omitted').replace(/[#*_~`>\[\]]/g, '').replace(/\n+/g, ' ').trim();
     if (!clean) return;
     synthesizeSpeech(clean).then((blob) => {
@@ -228,7 +324,7 @@ export function CommandCenter() {
       audioQueueRef.current.push(audio);
       if (!playingRef.current) playNextAudio();
     }).catch(() => {});
-  }, [playNextAudio]);
+  }, [wsVoiceActive, playNextAudio]);
 
   // ── Voice ──
   const handleVoiceTranscribed = useCallback((text: string) => {
@@ -252,7 +348,8 @@ export function CommandCenter() {
   const sendMessageRef = useRef<(text?: string) => Promise<void>>(undefined);
   // Will be set after sendMessage is defined — for now set in an effect below
 
-  const alwaysOnEnabled = speechEnabled && voiceAlwaysOn;
+  // Use old always-on only when WS voice stream is not available
+  const alwaysOnEnabled = speechEnabled && voiceAlwaysOn && !voiceStream.available;
 
   const handleAlwaysOnTranscribed = useCallback((text: string) => {
     if (text && sendMessageRef.current) {
@@ -290,6 +387,21 @@ export function CommandCenter() {
   });
 
   const handleMicClick = useCallback(async () => {
+    // Prefer WebSocket voice when server supports it
+    if (voiceStream.available) {
+      if (wsVoiceActive) {
+        voiceStream.disconnect();
+        wsAutoRef.current = false;
+      } else {
+        wsAutoRef.current = false;
+        interruptAudio();
+        await voiceStream.connect({ model: selectedModel }).catch(() => {
+          toast.error('Voice connection failed');
+        });
+      }
+      return;
+    }
+    // Fallback to old useSpeech path
     if (!speechAvailable) {
       toast.error('Speech backend not available — check server config');
       return;
@@ -306,7 +418,7 @@ export function CommandCenter() {
       voiceInitiatedRef.current = true;
       await startRecording();
     }
-  }, [speechState, speechAvailable, startRecording, stopRecording, interruptAudio]);
+  }, [voiceStream, wsVoiceActive, selectedModel, speechState, speechAvailable, startRecording, stopRecording, interruptAudio]);
 
   // ── Streaming ──
   const stopStreaming = useCallback(() => {
@@ -466,7 +578,8 @@ export function CommandCenter() {
 
   // ── Derived state ──
   const runningAgents = agents.filter((a) => a.status === 'running');
-  const voiceStatusLabel = alwaysOnEnabled
+  const alwaysOnUI = (speechEnabled && voiceAlwaysOn); // for display regardless of WS vs old
+  const voiceStatusLabel = alwaysOnUI
     ? jarvisState === 'speaking' ? 'SPEAKING'
     : jarvisState === 'listening' ? 'LISTENING'
     : jarvisState === 'thinking' ? 'PROCESSING'
@@ -476,7 +589,7 @@ export function CommandCenter() {
   const statusLabel = voiceStatusLabel || (isStreaming ? 'GENERATING' : runningAgents.length > 0 ? 'AGENTS ACTIVE' : 'STANDING BY');
   const statusSub = isStreaming
     ? streamState.phase || 'streaming'
-    : alwaysOnEnabled
+    : alwaysOnUI
     ? `always-on · ${runningAgents.length > 0 ? `${runningAgents.length} running` : 'idle'} · ${agents.length} agents`
     : `${runningAgents.length > 0 ? `${runningAgents.length} running` : 'idle'} · memory warm · ${agents.length} agents scheduled`;
   const modelLabel = selectedModel || serverInfo?.model || 'no model';
@@ -498,10 +611,11 @@ export function CommandCenter() {
           <span className="pt-hud">openjarvis // {engineLabel} // {modelLabel}</span>
           <button
             className="pt-hud pt-hud-dim"
-            style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer' }}
+            style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', minHeight: 44, display: 'flex', alignItems: 'center', padding: '0 8px' }}
             onClick={() => setCommandPaletteOpen(true)}
           >
-            ⌘K command
+            <span className="hidden sm:inline">⌘K command</span>
+            <span className="sm:hidden">models</span>
           </button>
         </div>
 
@@ -533,12 +647,12 @@ export function CommandCenter() {
                 </svg>
               </button>
               {/* Manual mic button — hidden when always-on is active */}
-              {!alwaysOnEnabled && (
+              {!alwaysOnUI && (
                 <button
-                  className={`pt-mic ${speechState === 'recording' ? 'pt-recording' : ''}`}
+                  className={`pt-mic ${(wsVoiceActive || speechState === 'recording') ? 'pt-recording' : ''}`}
                   onClick={(e) => { e.stopPropagation(); handleMicClick(); }}
-                  disabled={!speechEnabled || !speechAvailable || streamState.isStreaming}
-                  title={!speechAvailable ? 'Speech backend unavailable' : speechState === 'recording' ? 'Stop recording' : 'Start recording'}
+                  disabled={!speechEnabled || streamState.isStreaming}
+                  title={wsVoiceActive ? 'Disconnect voice' : speechState === 'recording' ? 'Stop recording' : 'Start recording'}
                 >
                   ●
                 </button>
@@ -658,6 +772,9 @@ export function CommandCenter() {
               </div>
             )}
 
+            {/* Situational Awareness */}
+            <SituationalPanel />
+
             {/* Approval pending */}
             {approvals.length > 0 && (
               <div className="pt-panel pt-card pt-attention">
@@ -689,34 +806,47 @@ export function CommandCenter() {
               </div>
             )}
 
-            {/* Agents */}
+            {/* Agents (collapsible) */}
             <div className="pt-panel pt-card">
-              <h3>Agents</h3>
-              {agents.length === 0 ? (
-                <div className="pt-hud pt-hud-dim" style={{ textAlign: 'center', padding: '12px 0' }}>No agents configured</div>
-              ) : (
-                agents.map((agent) => (
-                  <div className="pt-row" key={agent.id}>
-                    <span className={`pt-dot ${agentDotClass(agent.status)}`} />
-                    {agent.name}
-                    <span className="pt-meta pt-hud pt-hud-dim">{agentLabel(agent.status)}</span>
-                  </div>
-                ))
+              <button
+                className="pt-dropdown-toggle"
+                onClick={() => setAgentsOpen((o) => !o)}
+              >
+                <h3 style={{ marginBottom: 0 }}>
+                  Agents
+                  {runningAgents.length > 0 && (
+                    <span className="pt-hud" style={{ color: '#3df2dd', fontSize: 9, marginLeft: 8 }}>
+                      {runningAgents.length} running
+                    </span>
+                  )}
+                </h3>
+                <ChevronDown
+                  size={14}
+                  className={`pt-chevron ${agentsOpen ? 'pt-chevron-open' : ''}`}
+                />
+              </button>
+              {agentsOpen && (
+                agents.length === 0 ? (
+                  <div className="pt-hud pt-hud-dim" style={{ textAlign: 'center', padding: '12px 0' }}>No agents configured</div>
+                ) : (
+                  agents.map((agent) => (
+                    <div className="pt-row" key={agent.id}>
+                      <span className={`pt-dot ${agentDotClass(agent.status)}`} />
+                      {agent.name}
+                      <span className="pt-meta pt-hud pt-hud-dim">{agentLabel(agent.status)}</span>
+                    </div>
+                  ))
+                )
               )}
             </div>
+
+            {/* Social Media placeholder */}
+            <SocialPanel />
           </div>
         </div>
 
         {/* Telemetry footer */}
-        <div className="pt-panel pt-telemetry">
-          <span className="pt-hud">latency <b>{latencyMs ? `${latencyMs}ms` : '—'}</b></span>
-          <span className="pt-hud">{engineLabel} <b>{modelLabel}</b></span>
-          {approvals.length > 0 && (
-            <span className="pt-hud" style={{ marginLeft: 'auto', color: '#f5a524' }}>
-              {approvals.length} approval{approvals.length > 1 ? 's' : ''} pending
-            </span>
-          )}
-        </div>
+        <TelemetryStrip latencyMs={latencyMs} approvalsCount={approvals.length} />
       </div>
     </div>
   );

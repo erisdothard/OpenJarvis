@@ -808,7 +808,19 @@ async def synthesize_speech(request: Request):
 
     voice_id = body.get("voice_id", "")
     speed = body.get("speed", 1.0)
-    backend_name = body.get("backend", "cartesia")
+    # Read TTS backend from config; fall back to openai_tts
+    try:
+        import tomllib
+        from pathlib import Path
+        _cfg_path = Path.home() / ".openjarvis" / "config.toml"
+        _default_tts = "openai_tts"
+        if _cfg_path.exists():
+            with open(_cfg_path, "rb") as f:
+                _raw = tomllib.load(f)
+            _default_tts = _raw.get("speech", {}).get("tts_backend", "openai_tts")
+    except Exception:
+        _default_tts = "openai_tts"
+    backend_name = body.get("backend") or _default_tts
 
     # Cache TTS backends on app.state to avoid reloading models per request.
     # Pre-warming happens in app.py lifespan; this is the fallback path.
@@ -820,6 +832,7 @@ async def synthesize_speech(request: Request):
     if backend_name not in tts_cache:
         try:
             import openjarvis.speech.cartesia_tts  # noqa: F401
+            import openjarvis.speech.elevenlabs_tts  # noqa: F401
             import openjarvis.speech.kokoro_tts  # noqa: F401
             import openjarvis.speech.openai_tts  # noqa: F401
         except ImportError:
@@ -836,12 +849,36 @@ async def synthesize_speech(request: Request):
             logger.error("TTS backend '%s' init failed: %s", backend_name, e, exc_info=True)
             raise HTTPException(status_code=500, detail=f"TTS backend init failed: {e}")
 
-    backend = tts_cache[backend_name]
-    try:
-        result = backend.synthesize(text, voice_id=voice_id, speed=speed)
-    except Exception as e:
-        logger.error("TTS synthesis failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"TTS synthesis failed: {e}")
+    # Ordered fallback chain: try primary, then fall back to alternatives
+    _TTS_FALLBACK_ORDER = ["elevenlabs", "cartesia", "openai_tts"]
+    backends_to_try = [backend_name] + [b for b in _TTS_FALLBACK_ORDER if b != backend_name]
+
+    last_error = None
+    result = None
+    for try_name in backends_to_try:
+        # Ensure backend is loaded
+        if try_name not in tts_cache:
+            try:
+                b_cls = TTSRegistry.get(try_name)
+                tts_cache[try_name] = b_cls()
+            except (KeyError, Exception):
+                continue
+        try:
+            _kwargs = {"speed": speed}
+            if try_name == backend_name and voice_id:
+                _kwargs["voice_id"] = voice_id
+            result = tts_cache[try_name].synthesize(text, **_kwargs)
+            if try_name != backend_name:
+                logger.warning("TTS: %s failed, fell back to %s", backend_name, try_name)
+            break
+        except Exception as e:
+            last_error = e
+            logger.warning("TTS backend '%s' failed: %s — trying next", try_name, e)
+            continue
+
+    if result is None:
+        logger.error("All TTS backends failed. Last error: %s", last_error)
+        raise HTTPException(status_code=500, detail=f"All TTS backends failed: {last_error}")
 
     from fastapi.responses import Response
 

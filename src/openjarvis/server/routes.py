@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -248,7 +249,9 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     if agent is not None and not request_body.tools:
         resp = _handle_agent(agent, model, request_body, complexity_info)
         if memory_backend and resp.choices:
-            _store_chat_turn(
+            asyncio.get_event_loop().run_in_executor(
+                None,
+                _store_chat_turn,
                 memory_backend,
                 query_text_for_memory,
                 resp.choices[0].message.content or "",
@@ -265,7 +268,9 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
         complexity_info=complexity_info,
     )
     if memory_backend and resp.choices:
-        _store_chat_turn(
+        asyncio.get_event_loop().run_in_executor(
+            None,
+            _store_chat_turn,
             memory_backend,
             query_text_for_memory,
             resp.choices[0].message.content or "",
@@ -426,13 +431,17 @@ async def _handle_stream_with_tool_loop(
         get_fallback_model,
         is_billing_or_auth_error,
         is_cloud_model,
+        resolve_model_with_fallback,
     )
 
     messages = _to_messages(req.messages)
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     use_cloud = is_cloud_model(model)
     app_state = request.app.state
-    active_model = model  # may change if we fall back
+
+    # Pre-check provider cooldown — skip dead providers immediately
+    effective, original = resolve_model_with_fallback(model)
+    active_model = effective
 
     async def generate():
         nonlocal messages, active_model
@@ -445,6 +454,18 @@ async def _handle_stream_with_tool_loop(
             choices=[StreamChoice(delta=DeltaMessage(role="assistant"))],
         )
         yield f"data: {first_chunk.model_dump_json()}\n\n"
+
+        # Notify client if we pre-switched due to provider cooldown
+        if original:
+            notice = (
+                f"*Using `{active_model}` — `{original}` temporarily unavailable.*\n\n"
+            )
+            notice_chunk = ChatCompletionChunk(
+                id=chunk_id,
+                model=active_model,
+                choices=[StreamChoice(delta=DeltaMessage(content=notice))],
+            )
+            yield f"data: {notice_chunk.model_dump_json()}\n\n"
 
         for _turn in range(MAX_TOOL_TURNS):
             # Collect the full response (content + tool_calls) from this turn
@@ -492,6 +513,15 @@ async def _handle_stream_with_tool_loop(
             except Exception as exc:
                 # --- Provider fallback on billing / auth errors ---
                 if _turn == 0 and not turn_content and is_billing_or_auth_error(exc):
+                    from openjarvis.server.cloud_router import (
+                        get_provider,
+                        mark_provider_down,
+                    )
+
+                    provider = get_provider(active_model)
+                    if provider:
+                        mark_provider_down(provider)
+
                     fallback = get_fallback_model(active_model)
                     if fallback:
                         logger.warning(
@@ -573,13 +603,24 @@ async def _handle_stream_with_tool_loop(
                             model=model,
                             app_state=app_state,
                         )
-                        try:
-                            parsed_args = json.loads(tool_args) if tool_args else {}
-                        except (json.JSONDecodeError, TypeError):
-                            parsed_args = {}
-                        result = tool_instance.execute(**parsed_args)
-                        tool_result_content = result.content
-                        tool_succeeded = True
+
+                        # Block tools that require user confirmation in
+                        # the streaming path (no interactive prompt available).
+                        if getattr(tool_instance.spec, "requires_confirmation", False):
+                            tool_result_content = (
+                                f"Tool '{tool_name}' requires explicit user confirmation. "
+                                f"Present the content to the user first and ask them to "
+                                f"confirm before publishing. Do NOT call this tool again "
+                                f"without the user saying 'yes, publish it' or similar."
+                            )
+                        else:
+                            try:
+                                parsed_args = json.loads(tool_args) if tool_args else {}
+                            except (json.JSONDecodeError, TypeError):
+                                parsed_args = {}
+                            result = tool_instance.execute(**parsed_args)
+                            tool_result_content = result.content
+                            tool_succeeded = True
                 except Exception as tool_exc:
                     logger.error("Tool exec error %s: %s", tool_name, tool_exc, exc_info=True)
                     tool_result_content = f"Error: {tool_exc}"
@@ -756,13 +797,17 @@ async def _handle_stream(
         get_fallback_model,
         is_billing_or_auth_error,
         is_cloud_model,
+        mark_provider_down,
+        get_provider,
+        resolve_model_with_fallback,
         stream_cloud,
         stream_local,
     )
 
     messages = _to_messages(req.messages)
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    active_model = model
+    effective, original = resolve_model_with_fallback(model)
+    active_model = effective
 
     async def generate():
         nonlocal active_model
@@ -825,6 +870,9 @@ async def _handle_stream(
         except Exception as exc:
             # --- Provider fallback on billing / auth errors ---
             if is_billing_or_auth_error(exc):
+                prov = get_provider(active_model)
+                if prov:
+                    mark_provider_down(prov)
                 fallback = get_fallback_model(active_model)
                 if fallback:
                     logger.warning(

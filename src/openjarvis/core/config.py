@@ -1036,6 +1036,26 @@ class TracesConfig:
 
 
 @dataclass(slots=True)
+class GmailPushConfig:
+    """Gmail Pub/Sub push notification settings."""
+
+    gcp_project: str = ""
+    topic: str = ""
+    subscription: str = ""
+    service_account: str = ""
+    important_senders: List[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class AlertsConfig:
+    """Event-driven iMessage alert system settings."""
+
+    enabled: bool = True
+    phone: str = "+16152439891"
+    gmail_push: GmailPushConfig = field(default_factory=GmailPushConfig)
+
+
+@dataclass(slots=True)
 class ProactiveConfig:
     """Proactive agent — autonomous action scheduling and approval routing."""
 
@@ -1491,10 +1511,11 @@ class DigestSectionConfig:
 
 @dataclass
 class DigestConfig:
-    """Configuration for the morning digest feature."""
+    """Configuration for the daily digest feature (morning, midday, evening)."""
 
     enabled: bool = False
     schedule: str = "0 6 * * *"
+    schedules: Dict[str, str] = field(default_factory=lambda: {"morning": "0 6 * * *"})
     timezone: str = "America/Los_Angeles"
     persona: str = "jarvis"
     sections: List[str] = field(
@@ -1506,7 +1527,7 @@ class DigestConfig:
     honorific: str = "sir"
     voice_id: str = ""
     voice_speed: float = 1.0
-    tts_backend: str = "cartesia"
+    tts_backend: str = "openai_tts"
     messages: DigestSectionConfig = field(
         default_factory=lambda: DigestSectionConfig(
             sources=["gmail", "slack", "google_tasks"]
@@ -1556,6 +1577,7 @@ class JarvisConfig:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     digest: DigestConfig = field(default_factory=DigestConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
+    alerts: AlertsConfig = field(default_factory=AlertsConfig)
     mining: Optional["MiningConfig"] = None
 
     @property
@@ -1813,6 +1835,7 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
             "agent_manager",
             "digest",
             "proactive",
+            "alerts",
             "memory_files",
             "system_prompt",
             "compression",

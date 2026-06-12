@@ -375,25 +375,35 @@ def serve(
             system = SystemBuilder(config).build()
             executor.set_system(system)
 
-            # Auto-create morning_digest managed agent if digest is enabled
-            # and no morning_digest agent exists yet.
+            # Auto-create digest managed agents for each configured schedule
+            # (morning, midday, evening) if digest is enabled.
             if getattr(config, "digest", None) and getattr(config.digest, "enabled", False):
-                existing_types = {
-                    a.get("agent_type") for a in agent_manager.list_agents()
+                existing_agents = agent_manager.list_agents()
+                existing_names = {a.get("name", "") for a in existing_agents}
+                schedules = getattr(config.digest, "schedules", {})
+                if not schedules:
+                    schedules = {"morning": getattr(config.digest, "schedule", "0 6 * * *")}
+                _digest_labels = {
+                    "morning": "Morning Digest",
+                    "midday": "Midday Check-In",
+                    "evening": "Evening Circle-Back",
                 }
-                if "morning_digest" not in existing_types:
-                    agent_manager.create_agent(
-                        name="Morning Digest",
-                        agent_type="morning_digest",
-                        config={
-                            "model": "groq/llama-3.3-70b-versatile",
-                            "model_fallback_chain": "groq/llama-3.3-70b-versatile,qwen3:8b",
-                            "schedule_type": "cron",
-                            "schedule_value": getattr(config.digest, "schedule", "0 6 * * *"),
-                            "tools": ["digest_collect"],
-                        },
-                    )
-                    console.print("  Digest:    [cyan]auto-registered[/cyan]")
+                for dtype, cron in schedules.items():
+                    agent_name = _digest_labels.get(dtype, f"{dtype.title()} Digest")
+                    if agent_name not in existing_names:
+                        agent_manager.create_agent(
+                            name=agent_name,
+                            agent_type="morning_digest",
+                            config={
+                                "model": "groq/llama-3.3-70b-versatile",
+                                "model_fallback_chain": "groq/llama-3.3-70b-versatile,qwen3:8b",
+                                "schedule_type": "cron",
+                                "schedule_value": cron,
+                                "digest_type": dtype,
+                                "tools": ["digest_collect"],
+                            },
+                        )
+                        console.print(f"  {agent_name}: [cyan]auto-registered[/cyan]")
 
             agent_scheduler = AgentScheduler(
                 manager=agent_manager,
@@ -613,6 +623,13 @@ def serve(
             "enabled on non-loopback interface. This allows any website to make "
             "authenticated requests to your instance."
         )
+
+    # --- Alerts: event-driven via /api/alert endpoint ---
+    # Calendar/reminder alerts: launchd → event_watcher.py → POST /api/alert
+    # Email alerts: Gmail Pub/Sub → gmail_push.py (started in app.py lifespan)
+    if config.alerts.enabled:
+        phone = config.alerts.phone or "+16152439891"
+        console.print(f"  Alerts:    [cyan]iMessage → {phone}[/cyan] (event-driven)")
 
     import uvicorn
 
