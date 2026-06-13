@@ -170,6 +170,9 @@ packages = ["src/openjarvis"]
 "scripts/install" = "_install_scripts"
 "deploy/windows" = "_deploy/windows"
 
+[tool.vercel]
+entrypoint = "api.index:app"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
