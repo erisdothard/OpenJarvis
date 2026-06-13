@@ -55,6 +55,8 @@ def _load_keys() -> dict[str, str]:
         "GOOGLE_API_KEY",
         "OPENROUTER_API_KEY",
         "MINIMAX_API_KEY",
+        "GROQ_API_KEY",
+        "DEEPSEEK_API_KEY",
     ):
         val = os.environ.get(name)
         if val:
@@ -72,6 +74,10 @@ def get_provider(model: str) -> str | None:
         return "google"
     if any(model.startswith(p) for p in _MINIMAX_PREFIXES):
         return "minimax"
+    if model.startswith("groq/"):
+        return "groq"
+    if model.startswith("deepseek/"):
+        return "deepseek"
     if any(model.startswith(org) for org in _LOCAL_HF_ORGS):
         return None  # local model, never route to cloud
     if "/" in model:  # openrouter format: "meta-llama/llama-3-8b"
@@ -82,6 +88,142 @@ def get_provider(model: str) -> str | None:
 def is_cloud_model(model: str) -> bool:
     """Return True if the model is served by a cloud provider."""
     return get_provider(model) is not None
+
+
+def is_billing_or_auth_error(exc: Exception) -> bool:
+    """Return True if the exception indicates a billing, quota, or auth failure."""
+    # Anthropic SDK errors
+    for attr in ("status_code", "status"):
+        code = getattr(exc, attr, None)
+        if code in (400, 401, 402, 403, 429):
+            msg = str(exc).lower()
+            if any(kw in msg for kw in (
+                "credit", "balance", "billing", "quota", "rate",
+                "exceeded", "limit", "insufficient", "payment",
+                "unauthorized", "authentication", "permission",
+            )):
+                return True
+    # httpx.HTTPStatusError
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        code = getattr(resp, "status_code", None)
+        if code in (400, 401, 402, 403, 429):
+            msg = str(exc).lower()
+            if any(kw in msg for kw in (
+                "credit", "balance", "billing", "quota", "rate",
+                "exceeded", "limit", "insufficient", "payment",
+            )):
+                return True
+    return False
+
+
+# Fallback chain: provider → ordered list of (provider, model) to try
+_FALLBACK_CHAIN: dict[str, list[tuple[str, str]]] = {
+    "anthropic": [
+        ("google", "gemini-2.5-flash"),
+        ("openai", "gpt-4o-mini"),
+        ("groq", "groq/llama-3.3-70b-versatile"),
+    ],
+    "openai": [
+        ("anthropic", "claude-sonnet-4-20250514"),
+        ("google", "gemini-2.5-flash"),
+        ("groq", "groq/llama-3.3-70b-versatile"),
+    ],
+    "google": [
+        ("anthropic", "claude-sonnet-4-20250514"),
+        ("openai", "gpt-4o-mini"),
+        ("groq", "groq/llama-3.3-70b-versatile"),
+    ],
+    "groq": [
+        ("google", "gemini-2.5-flash"),
+        ("openai", "gpt-4o-mini"),
+        ("anthropic", "claude-sonnet-4-20250514"),
+    ],
+    "deepseek": [
+        ("google", "gemini-2.5-flash"),
+        ("groq", "groq/llama-3.3-70b-versatile"),
+        ("openai", "gpt-4o-mini"),
+    ],
+}
+
+# Map provider names to their API key env var names
+_PROVIDER_KEY_NAMES: dict[str, list[str]] = {
+    "anthropic": ["ANTHROPIC_API_KEY"],
+    "openai": ["OPENAI_API_KEY"],
+    "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    "groq": ["GROQ_API_KEY"],
+    "deepseek": ["DEEPSEEK_API_KEY"],
+    "openrouter": ["OPENROUTER_API_KEY"],
+    "minimax": ["MINIMAX_API_KEY"],
+}
+
+
+def get_fallback_model(failed_model: str) -> str | None:
+    """Return the best available fallback model, or None if nothing is available."""
+    provider = get_provider(failed_model)
+    if not provider or provider not in _FALLBACK_CHAIN:
+        return None
+    keys = _load_keys()
+    for fb_provider, fb_model in _FALLBACK_CHAIN[provider]:
+        # Skip providers that are also in cooldown
+        if _is_provider_cooled_down(fb_provider):
+            continue
+        key_names = _PROVIDER_KEY_NAMES.get(fb_provider, [])
+        if any(keys.get(k) for k in key_names):
+            return fb_model
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Provider cooldown — avoids wasting a round-trip on every request when a
+# provider is known to be down (billing, auth, rate-limit).  Cooldown is
+# short (5 min) so recovery is automatic once credits are added.
+# ---------------------------------------------------------------------------
+
+import time as _time
+import logging as _logging
+
+_cooldown_log = _logging.getLogger("openjarvis.cloud_router")
+
+# {provider_name: expiry_timestamp}
+_provider_cooldowns: dict[str, float] = {}
+_COOLDOWN_SECONDS = 90  # 90 seconds
+
+
+def mark_provider_down(provider: str) -> None:
+    """Record that a provider is temporarily unavailable."""
+    _provider_cooldowns[provider] = _time.monotonic() + _COOLDOWN_SECONDS
+    _cooldown_log.warning(
+        "Provider %s marked down for %ds", provider, _COOLDOWN_SECONDS,
+    )
+
+
+def _is_provider_cooled_down(provider: str) -> bool:
+    expiry = _provider_cooldowns.get(provider)
+    if expiry is None:
+        return False
+    if _time.monotonic() >= expiry:
+        del _provider_cooldowns[provider]
+        return False
+    return True
+
+
+def resolve_model_with_fallback(model: str) -> tuple[str, str | None]:
+    """Pre-check: if the model's provider is in cooldown, return the
+    fallback immediately.  Returns ``(effective_model, original_or_None)``.
+
+    If no cooldown is active, returns ``(model, None)`` — use the model
+    as-is.  If a fallback was selected, returns
+    ``(fallback_model, original_model)`` so callers can notify the user.
+    """
+    provider = get_provider(model)
+    if not provider or not _is_provider_cooled_down(provider):
+        return model, None
+    fallback = get_fallback_model(model)
+    if fallback:
+        return fallback, model
+    # No fallback available — try the original anyway (cooldown may be stale)
+    return model, None
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +534,42 @@ async def stream_cloud(
             max_tokens,
             base_url="https://api.minimax.io/v1",
             api_key_name="MINIMAX_API_KEY",
+        ):
+            yield token
+
+    elif provider == "groq":
+        keys = _load_keys()
+        api_key = keys.get("GROQ_API_KEY", "")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY not set — add it in the Cloud Models tab")
+        # Strip "groq/" prefix — Groq API expects bare model names
+        bare_model = model.removeprefix("groq/")
+        async for token in _stream_openai(
+            bare_model,
+            messages,
+            temperature,
+            max_tokens,
+            base_url="https://api.groq.com/openai/v1",
+            api_key_name="GROQ_API_KEY",
+        ):
+            yield token
+
+    elif provider == "deepseek":
+        keys = _load_keys()
+        api_key = keys.get("DEEPSEEK_API_KEY", "")
+        if not api_key:
+            raise ValueError(
+                "DEEPSEEK_API_KEY not set — add it in the Cloud Models tab"
+            )
+        # Strip "deepseek/" prefix — DeepSeek API expects bare model names
+        bare_model = model.removeprefix("deepseek/")
+        async for token in _stream_openai(
+            bare_model,
+            messages,
+            temperature,
+            max_tokens,
+            base_url="https://api.deepseek.com/v1",
+            api_key_name="DEEPSEEK_API_KEY",
         ):
             yield token
 

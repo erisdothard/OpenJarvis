@@ -38,6 +38,7 @@ const OPTIN_NAME_KEY = 'openjarvis-display-name';
 const OPTIN_EMAIL_KEY = 'openjarvis-email';
 const OPTIN_ANONID_KEY = 'openjarvis-anon-id';
 const OPTIN_SEEN_KEY = 'openjarvis-optin-seen';
+const SPEECH_MIGRATED_KEY = 'openjarvis-speech-migrated';
 
 interface ConversationStore {
   version: 1;
@@ -80,6 +81,7 @@ interface Settings {
   temperature: number;
   maxTokens: number;
   speechEnabled: boolean;
+  voiceAlwaysOn: boolean;
 }
 
 function loadSettings(): Settings {
@@ -92,12 +94,23 @@ function loadSettings(): Settings {
     defaultAgent: '',
     temperature: 0.7,
     maxTokens: 4096,
-    speechEnabled: false,
+    speechEnabled: true,
+    voiceAlwaysOn: false,
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return defaults;
-    return { ...defaults, ...JSON.parse(raw) };
+    const merged = { ...defaults, ...JSON.parse(raw) };
+
+    // One-time migration: override stale speechEnabled=false from before
+    // the default was flipped to true.
+    if (!localStorage.getItem(SPEECH_MIGRATED_KEY)) {
+      merged.speechEnabled = true;
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
+      localStorage.setItem(SPEECH_MIGRATED_KEY, '1');
+    }
+
+    return merged;
   } catch {
     return defaults;
   }
@@ -117,7 +130,15 @@ const INITIAL_STREAM: StreamState = {
   content: '',
 };
 
+export type JarvisState = 'idle' | 'listening' | 'thinking' | 'speaking';
+
 interface AppState {
+  // Voice presence
+  jarvisState: JarvisState;
+  audioLevel: number; // 0-1, real-time mic/speaker amplitude for orb reactivity
+  setJarvisState: (state: JarvisState) => void;
+  setAudioLevel: (level: number) => void;
+
   // Conversations
   conversations: Conversation[];
   activeId: string | null;
@@ -139,6 +160,9 @@ interface AppState {
 
   // Sidebar
   sidebarOpen: boolean;
+
+  // Mobile more sheet
+  moreSheetOpen: boolean;
 
   // System panel
   systemPanelOpen: boolean;
@@ -197,6 +221,7 @@ interface AppState {
   setCommandPaletteOpen: (open: boolean) => void;
   toggleSidebar: () => void;
   setSidebarOpen: (open: boolean) => void;
+  setMoreSheetOpen: (open: boolean) => void;
   toggleSystemPanel: () => void;
   setSystemPanelOpen: (open: boolean) => void;
 
@@ -232,6 +257,17 @@ interface AppState {
   // Model loading
   modelLoading: boolean;
   setModelLoading: (loading: boolean) => void;
+
+  // Briefing
+  briefing: {
+    status: 'idle' | 'loading' | 'generating' | 'ready' | 'speaking' | 'error';
+    text: string | null;
+    error: string | null;
+    followUpQuestions: string[];
+  };
+  setBriefingStatus: (status: AppState['briefing']['status']) => void;
+  setBriefingText: (text: string | null, followUpQuestions?: string[]) => void;
+  setBriefingError: (error: string | null) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => {
@@ -241,6 +277,11 @@ export const useAppStore = create<AppState>((set, get) => {
   );
 
   return {
+    jarvisState: 'idle' as JarvisState,
+    audioLevel: 0,
+    setJarvisState: (state: JarvisState) => set({ jarvisState: state }),
+    setAudioLevel: (level: number) => set({ audioLevel: level }),
+
     conversations: convList,
     activeId: initial.activeId,
     messages:
@@ -259,6 +300,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     commandPaletteOpen: false,
     sidebarOpen: true,
+    moreSheetOpen: false,
     systemPanelOpen: true,
 
     optInEnabled: localStorage.getItem(OPTIN_KEY) === 'true',
@@ -490,6 +532,7 @@ export const useAppStore = create<AppState>((set, get) => {
     setCommandPaletteOpen: (open: boolean) => set({ commandPaletteOpen: open }),
     toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
     setSidebarOpen: (open: boolean) => set({ sidebarOpen: open }),
+    setMoreSheetOpen: (open: boolean) => set({ moreSheetOpen: open }),
     toggleSystemPanel: () => set((s) => ({ systemPanelOpen: !s.systemPanelOpen })),
     setSystemPanelOpen: (open: boolean) => set({ systemPanelOpen: open }),
 
@@ -519,6 +562,22 @@ export const useAppStore = create<AppState>((set, get) => {
     // ── Model loading ───────────────────────────────────────────────
     modelLoading: false,
     setModelLoading: (loading) => set({ modelLoading: loading }),
+
+    // ── Briefing ────────────────────────────────────────────────────
+    briefing: { status: 'idle', text: null, error: null, followUpQuestions: [] },
+    setBriefingStatus: (status) =>
+      set((s) => ({ briefing: { ...s.briefing, status } })),
+    setBriefingText: (text, followUpQuestions) =>
+      set((s) => ({
+        briefing: {
+          ...s.briefing,
+          text,
+          status: 'ready',
+          followUpQuestions: followUpQuestions ?? [],
+        },
+      })),
+    setBriefingError: (error) =>
+      set((s) => ({ briefing: { ...s.briefing, error, status: 'error' } })),
 
     // ── Opt-in sharing ──────────────────────────────────────────────
 

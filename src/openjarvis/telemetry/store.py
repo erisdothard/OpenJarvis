@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from openjarvis.core.db import open_db
 from openjarvis.core.events import Event, EventBus, EventType
 from openjarvis.core.types import TelemetryRecord
 
@@ -147,7 +148,7 @@ class TelemetryStore:
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
-        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        self._conn = open_db(db_path)
         self._conn.execute(_CREATE_TABLE)
         self._conn.execute(_CREATE_MINING_STATS_TABLE)
         self._conn.commit()
@@ -268,6 +269,21 @@ INSERT INTO mining_stats (
                 self.record(rec)
             except Exception as exc:
                 logger.debug("Failed to record telemetry event: %s", exc)
+
+    def purge(self, max_age_days: int = 30) -> int:
+        """Delete telemetry rows older than *max_age_days*.
+
+        The ``timestamp`` column is a Unix epoch float, so the cutoff is
+        computed as ``time.time() - max_age_days * 86400``.
+
+        Returns the number of rows deleted.
+        """
+        cutoff = time.time() - max_age_days * 86400
+        cur = self._conn.execute(
+            "DELETE FROM telemetry WHERE timestamp < ?", (cutoff,)
+        )
+        self._conn.commit()
+        return cur.rowcount
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""

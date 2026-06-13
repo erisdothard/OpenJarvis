@@ -16,7 +16,6 @@ Typical usage::
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -24,6 +23,7 @@ from typing import Any, Dict, Optional
 from openjarvis.connectors._stubs import BaseConnector
 from openjarvis.connectors.pipeline import IngestionPipeline
 from openjarvis.core.config import DEFAULT_CONFIG_DIR
+from openjarvis.core.db import open_db
 
 # ---------------------------------------------------------------------------
 # DDL
@@ -66,9 +66,7 @@ class SyncEngine:
         if str(db_path) != ":memory:":
             db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL;")
+        self._conn = open_db(db_path, row_factory=True)
         self._conn.execute(_CREATE_STATE_TABLE)
         self._conn.commit()
 

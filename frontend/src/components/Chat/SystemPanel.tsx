@@ -90,7 +90,7 @@ export function SystemPanel() {
         className="flex items-center justify-between px-4 py-3 shrink-0"
         style={{ borderBottom: '1px solid var(--color-border)' }}
       >
-        <span className="text-xs font-semibold tracking-wide uppercase" style={{ color: 'var(--color-text-secondary)' }}>
+        <span className="text-[13px] font-medium" style={{ color: 'var(--color-text-bright)' }}>
           System
         </span>
         <button
@@ -106,7 +106,7 @@ export function SystemPanel() {
       <div className="flex flex-col gap-4 p-4">
         {/* Session Stats */}
         <section>
-          <h4 className="text-[11px] font-medium uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-tertiary)' }}>
+          <h4 className="text-[12px] font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>
             Session
           </h4>
           <div className="grid grid-cols-2 gap-2">
@@ -117,7 +117,7 @@ export function SystemPanel() {
 
         {/* Device */}
         <section>
-          <h4 className="text-[11px] font-medium uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-tertiary)' }}>
+          <h4 className="text-[12px] font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>
             Device
           </h4>
           <div className="grid grid-cols-2 gap-2">
@@ -147,7 +147,7 @@ export function SystemPanel() {
 
         {/* Cost Comparison */}
         <section>
-          <h4 className="text-[11px] font-medium uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-tertiary)' }}>
+          <h4 className="text-[12px] font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>
             Cost Comparison
           </h4>
 
@@ -212,10 +212,7 @@ export function SystemPanel() {
 
         {/* Leaderboard / Share */}
         <section>
-          <h4
-            className="text-[11px] font-medium uppercase tracking-wide mb-2"
-            style={{ color: 'var(--color-text-tertiary)' }}
-          >
+          <h4 className="text-[12px] font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>
             Leaderboard
           </h4>
 

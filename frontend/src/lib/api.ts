@@ -193,7 +193,7 @@ export async function deleteModel(modelName: string): Promise<void> {
   }
 }
 
-const _CLOUD_PREFIXES = ['gpt-', 'o1-', 'o3-', 'o4-', 'claude-', 'gemini-', 'openrouter/'];
+const _CLOUD_PREFIXES = ['gpt-', 'o1-', 'o3-', 'o4-', 'claude-', 'gemini-', 'openrouter/', 'groq/', 'deepseek/'];
 
 export async function preloadModel(modelName: string): Promise<void> {
   // Cloud models don't need Ollama preloading
@@ -257,6 +257,54 @@ export async function checkHealth(): Promise<boolean> {
   };
   if (await probe('/health')) return true;
   return probe('/v1/connectors');
+}
+
+export interface GlanceData {
+  timestamp: string;
+  calendar: Array<{
+    summary: string;
+    start: string;
+    end: string;
+    calendar: string;
+    all_day: boolean;
+  }>;
+  reminders: Array<{
+    name: string;
+    due_date: string | null;
+    overdue: boolean;
+  }>;
+  unread_emails: number | null;
+  weather: {
+    temp_f: string;
+    condition: string;
+    humidity: string;
+    feels_like_f: string;
+    location: string;
+  } | null;
+  disk: {
+    total_gb: number;
+    used_gb: number;
+    free_gb: number;
+    percent_used: number;
+  };
+  ollama: {
+    running: boolean;
+    models: Array<{ name: string; size_gb: number }>;
+  };
+  uptime: {
+    seconds: number;
+    display: string;
+  };
+}
+
+export async function fetchGlance(): Promise<GlanceData | null> {
+  try {
+    const res = await apiFetch('/api/glance');
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchEnergy(): Promise<unknown> {
@@ -342,6 +390,24 @@ export async function fetchSpeechHealth(): Promise<SpeechHealth> {
   const res = await apiFetch(`/v1/speech/health`);
   if (!res.ok) return { available: false };
   return res.json();
+}
+
+export async function synthesizeSpeech(text: string, voiceId?: string): Promise<Blob> {
+  const res = await apiFetch(`/v1/speech/synthesize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text,
+      voice_id: voiceId || 'fable',
+      backend: 'openai_tts',
+      speed: 1.0,
+    }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`TTS failed (${res.status}): ${detail || res.statusText}`);
+  }
+  return res.blob();
 }
 
 // ---------------------------------------------------------------------------
@@ -1089,4 +1155,86 @@ export async function setInferenceSource(
     // required…", "Could not store the API key…") as proper Error instances.
     throw new Error(e?.message ?? e ?? 'Failed to save inference source');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Digest / Morning Briefing
+// ---------------------------------------------------------------------------
+
+export type DigestType = 'morning' | 'midday' | 'evening';
+
+export interface DigestData {
+  text: string;
+  sections: Record<string, string>;
+  sources_used: string[];
+  generated_at: string;
+  model_used: string;
+  voice_used: string;
+  audio_available: boolean;
+  digest_type: DigestType;
+  follow_up_questions: string[];
+}
+
+/** Determine which digest type is current based on time of day. */
+export function currentDigestType(): DigestType {
+  const hour = new Date().getHours();
+  if (hour < 10) return 'morning';
+  if (hour < 16) return 'midday';
+  return 'evening';
+}
+
+export async function fetchDigest(type?: DigestType): Promise<DigestData | null> {
+  try {
+    const params = type ? `?type=${type}` : '';
+    const res = await apiFetch(`/api/digest${params}`);
+    if (res.status === 404) return null;
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function generateDigest(type?: DigestType): Promise<DigestData | null> {
+  try {
+    const digestType = type || currentDigestType();
+    const res = await apiFetch(`/api/digest/generate?type=${digestType}`, { method: 'POST' });
+    if (!res.ok) return null;
+    // After generation, fetch the full digest object
+    return fetchDigest(digestType);
+  } catch {
+    return null;
+  }
+}
+
+export function getDigestAudioUrl(type?: DigestType): string {
+  const params = type ? `?type=${type}` : '';
+  return `${getBase()}/api/digest/audio${params}`;
+}
+
+// ---------------------------------------------------------------------------
+// Voice WebSocket Streaming
+// ---------------------------------------------------------------------------
+
+export interface VoiceStreamHealth {
+  available: boolean;
+  vad: boolean;
+  stt: boolean;
+}
+
+export async function fetchVoiceStreamHealth(): Promise<VoiceStreamHealth> {
+  try {
+    const res = await apiFetch('/v1/voice/health');
+    if (!res.ok) return { available: false, vad: false, stt: false };
+    return res.json();
+  } catch {
+    return { available: false, vad: false, stt: false };
+  }
+}
+
+/** Build WebSocket URL for voice streaming endpoint. */
+export function getVoiceWsUrl(): string {
+  const base = getBase() || window.location.origin;
+  const wsBase = base.replace(/^http/, 'ws');
+  return `${wsBase}/v1/voice/stream`;
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import List
 
@@ -10,7 +11,12 @@ import httpx
 from openjarvis.core.registry import TTSRegistry
 from openjarvis.speech.tts import TTSBackend, TTSResult
 
+logger = logging.getLogger(__name__)
+
 _OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
+_VALID_VOICES = {"alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"}
+_MAX_INPUT_LENGTH = 4096
+_DEFAULT_VOICE = "fable"
 
 
 def _openai_tts_request(
@@ -34,7 +40,13 @@ def _openai_tts_request(
         },
         timeout=120.0,
     )
-    resp.raise_for_status()
+    if not resp.is_success:
+        body = resp.text[:500] if resp.text else "(empty)"
+        logger.error(
+            "OpenAI TTS %s: %s | voice=%s model=%s len=%d | body: %s",
+            resp.status_code, resp.reason_phrase, voice, model, len(text), body,
+        )
+        resp.raise_for_status()
     return resp.content
 
 
@@ -59,6 +71,20 @@ class OpenAITTSBackend(TTSBackend):
         if not self._api_key:
             raise RuntimeError("OPENAI_API_KEY not set")
 
+        # Validate / default voice
+        if not voice_id or voice_id not in _VALID_VOICES:
+            if voice_id:
+                logger.warning("Invalid OpenAI TTS voice '%s', falling back to '%s'", voice_id, _DEFAULT_VOICE)
+            voice_id = _DEFAULT_VOICE
+
+        # Truncate oversized input to avoid 400
+        if len(text) > _MAX_INPUT_LENGTH:
+            logger.warning("TTS input truncated from %d to %d chars", len(text), _MAX_INPUT_LENGTH)
+            text = text[:_MAX_INPUT_LENGTH]
+
+        # Clamp speed to valid range
+        speed = max(0.25, min(4.0, speed))
+
         audio = _openai_tts_request(
             self._api_key,
             text,
@@ -76,7 +102,7 @@ class OpenAITTSBackend(TTSBackend):
         )
 
     def available_voices(self) -> List[str]:
-        return ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+        return sorted(_VALID_VOICES)
 
     def health(self) -> bool:
         return bool(self._api_key)

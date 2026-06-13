@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple
@@ -287,3 +288,154 @@ class SystemPromptBuilder:
             nudge_interval=mf.nudge_interval,
             persona_name=name,
         )
+
+
+def _file_mtime(path_str: str) -> float:
+    """Return mtime of a file, or 0.0 if it does not exist."""
+    if not path_str:
+        return 0.0
+    try:
+        return Path(path_str).expanduser().stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+class SystemPromptCache:
+    """Thread-safe cache for SystemPromptBuilder instances.
+
+    Avoids re-reading SOUL.md, MEMORY.md, and USER.md from disk on every
+    HTTP request or agent tick.  Staleness is detected by comparing file
+    mtimes (one stat() per file, ~0.1 ms total) against the values recorded
+    when the cache was last populated.
+
+    The cache stores a ``SystemPromptBuilder`` instance that has already had
+    its frozen prefix computed (i.e. the first ``build()`` call has been made
+    so ``_frozen_prefix`` and ``_frozen_sections`` are populated).  Subsequent
+    ``build()`` calls on the returned instance are therefore O(1) string
+    concatenations — no disk I/O.
+
+    ``get_or_create()`` returns a *fresh* builder instance whose
+    ``_frozen_prefix`` / ``_frozen_sections`` are shared via copy from the
+    cached builder.  Dynamic fields (``session_context``, ``previous_state``)
+    on the returned instance are always ``None`` so callers control them.
+
+    Usage::
+
+        cache = SystemPromptCache()
+        builder = cache.get_or_create(
+            agent_template=agent_template,
+            memory_files_config=cfg.memory_files,
+            system_prompt_config=cfg.system_prompt,
+        )
+        prompt = builder.build()                      # fast — no disk I/O
+        persona = builder.persona_sections()          # also fine
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # Cached state — all protected by _lock.
+        self._cached_key: tuple | None = None
+        self._cached_mtimes: tuple[float, float, float] | None = None
+        self._cached_builder: Optional[SystemPromptBuilder] = None
+
+    def _build_key(
+        self,
+        agent_template: str,
+        mf: MemoryFilesConfig,
+        sp: SystemPromptConfig,
+    ) -> tuple:
+        """Return a hashable key covering all inputs that affect the build."""
+        resolved_mf = SystemPromptBuilder._resolve_persona(mf)
+        return (
+            agent_template,
+            resolved_mf.soul_path,
+            resolved_mf.memory_path,
+            resolved_mf.user_path,
+            sp.prefix,
+            sp.soul_max_chars,
+            sp.memory_max_chars,
+            sp.user_max_chars,
+            sp.skill_desc_max_chars,
+            sp.truncation_strategy,
+        )
+
+    def _current_mtimes(
+        self,
+        mf: MemoryFilesConfig,
+    ) -> tuple[float, float, float]:
+        resolved_mf = SystemPromptBuilder._resolve_persona(mf)
+        return (
+            _file_mtime(resolved_mf.soul_path),
+            _file_mtime(resolved_mf.memory_path),
+            _file_mtime(resolved_mf.user_path),
+        )
+
+    def _clone(self, source: SystemPromptBuilder) -> SystemPromptBuilder:
+        """Return a new builder that shares the pre-computed frozen state.
+
+        The clone has ``session_context=None`` and ``previous_state=None`` so
+        callers control dynamic suffixes independently.  All frozen fields
+        (``_frozen_prefix``, ``_frozen_sections``) are copied by reference —
+        they are both read-only once built, so sharing is safe.
+        """
+        clone = SystemPromptBuilder.__new__(SystemPromptBuilder)
+        # Copy every attribute the __init__ would set.
+        clone._agent_template = source._agent_template
+        clone._mf_config = source._mf_config
+        clone._sp_config = source._sp_config
+        clone._skill_index = source._skill_index
+        clone._session_context = None    # caller sets this if needed
+        clone._previous_state = None     # caller sets this if needed
+        clone._skill_catalog_xml = source._skill_catalog_xml
+        clone._skill_few_shot = source._skill_few_shot
+        # Share the already-computed frozen state — read-only, safe to share.
+        clone._frozen_prefix = source._frozen_prefix
+        clone._frozen_sections = source._frozen_sections
+        return clone
+
+    def get_or_create(
+        self,
+        agent_template: str = "",
+        memory_files_config: Optional[MemoryFilesConfig] = None,
+        system_prompt_config: Optional[SystemPromptConfig] = None,
+    ) -> SystemPromptBuilder:
+        """Return a builder with pre-computed frozen prefix, rebuilding if stale.
+
+        The returned builder has ``session_context=None`` and
+        ``previous_state=None``.  Set those on the returned instance before
+        calling ``build()`` if you need dynamic suffixes.
+        """
+        mf = memory_files_config or MemoryFilesConfig()
+        sp = system_prompt_config or SystemPromptConfig()
+
+        key = self._build_key(agent_template, mf, sp)
+        mtimes = self._current_mtimes(mf)
+
+        with self._lock:
+            if (
+                self._cached_key == key
+                and self._cached_mtimes == mtimes
+                and self._cached_builder is not None
+            ):
+                return self._clone(self._cached_builder)
+
+            # Cache miss or stale — build fresh and warm the frozen prefix.
+            builder = SystemPromptBuilder(
+                agent_template=agent_template,
+                memory_files_config=mf,
+                system_prompt_config=sp,
+            )
+            # Trigger frozen-prefix computation so subsequent clones are O(1).
+            builder.build()
+
+            self._cached_key = key
+            self._cached_mtimes = mtimes
+            self._cached_builder = builder
+            return self._clone(builder)
+
+    def invalidate(self) -> None:
+        """Force the next call to rebuild regardless of file mtimes."""
+        with self._lock:
+            self._cached_key = None
+            self._cached_mtimes = None
+            self._cached_builder = None

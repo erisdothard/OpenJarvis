@@ -562,6 +562,7 @@ class IntelligenceConfig:
 
     default_model: str = ""
     fallback_model: str = ""
+    model_fallback_chain: str = ""  # Comma-separated: "gemini-2.5-flash,qwen3:8b"
     model_path: str = ""  # Local weights (HF repo, GGUF file, etc.)
     checkpoint_path: str = ""  # Checkpoint/adapter path
     quantization: str = "none"  # none, fp8, int8, int4, gguf_q4, gguf_q8
@@ -574,6 +575,8 @@ class IntelligenceConfig:
     top_k: int = 40
     repetition_penalty: float = 1.0
     stop_sequences: str = ""  # Comma-separated stop strings
+    fast_model: str = ""  # Cheaper model for trivial/simple queries
+    smart_routing_enabled: bool = True  # Enable automatic model downrouting
 
 
 @dataclass(slots=True)
@@ -895,9 +898,9 @@ class StorageConfig:
 
     default_backend: str = "sqlite"
     db_path: str = str(DEFAULT_CONFIG_DIR / "memory.db")
-    context_top_k: int = 5
-    context_min_score: float = 0.0
-    context_max_tokens: int = 2048
+    context_top_k: int = 3        # 3 high-quality chunks > 5 mediocre
+    context_min_score: float = 1.0  # filter near-noise BM25 results
+    context_max_tokens: int = 1024  # halved for meaningful token savings
     chunk_size: int = 512
     chunk_overlap: int = 64
 
@@ -945,10 +948,10 @@ class AgentConfig:
     system_prompt: str = ""  # inline system prompt (takes precedence if set)
     system_prompt_path: str = ""  # path to system prompt file (.txt, .md)
     context_from_memory: bool = True  # inject relevant memory context into prompts
+    batch_mode: str = "auto"  # "auto" | "always" | "never" — Anthropic Batch API usage
     default_system_prompt: str = (
-        "You are a helpful AI assistant running locally on the user's own "
-        "hardware through OpenJarvis. You are not a cloud service. Respond "
-        "helpfully, concisely, and accurately."
+        "You are a helpful AI assistant powered by OpenJarvis. "
+        "Respond helpfully, concisely, and accurately."
     )
 
     # Backward-compat property for old field name
@@ -1035,6 +1038,26 @@ class TracesConfig:
 
 
 @dataclass(slots=True)
+class GmailPushConfig:
+    """Gmail Pub/Sub push notification settings."""
+
+    gcp_project: str = ""
+    topic: str = ""
+    subscription: str = ""
+    service_account: str = ""
+    important_senders: List[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class AlertsConfig:
+    """Event-driven iMessage alert system settings."""
+
+    enabled: bool = True
+    phone: str = "+16152439891"
+    gmail_push: GmailPushConfig = field(default_factory=GmailPushConfig)
+
+
+@dataclass(slots=True)
 class ProactiveConfig:
     """Proactive agent — autonomous action scheduling and approval routing."""
 
@@ -1045,6 +1068,17 @@ class ProactiveConfig:
     # Channel to send approval notifications and receive yes/no replies.
     # Format: "{type}:{id}", e.g. "imessage:+15551234567" or "telegram:123456789"
     notification_channel: str = ""
+
+
+@dataclass(slots=True)
+class CheckinConfig:
+    """Daily check-in — Jarvis texts asking for updates, routes replies."""
+
+    enabled: bool = False
+    schedule: str = "0 16 * * *"  # cron expression (default: 4pm daily)
+    timezone: str = "America/Chicago"
+    phone: str = "+16152439891"  # iMessage recipient (E.164)
+    reply_timeout_minutes: int = 60  # how long to wait for a reply
 
 
 @dataclass(slots=True)
@@ -1395,7 +1429,7 @@ class SpeechConfig:
     model: str = "base"  # Whisper model size: tiny, base, small, medium, large-v3
     language: str = ""  # Empty = auto-detect
     device: str = "auto"  # "auto", "cpu", "cuda"
-    compute_type: str = "float16"  # "float16", "int8", "float32"
+    compute_type: str = "int8"  # "int8", "float16", "float32"
 
 
 @dataclass(slots=True)
@@ -1441,6 +1475,7 @@ class SystemPromptConfig:
     user_max_chars: int = 1500
     skill_desc_max_chars: int = 60
     truncation_strategy: str = "head_tail"
+    max_history_tokens: int = 32_000
 
 
 @dataclass(slots=True)
@@ -1490,10 +1525,11 @@ class DigestSectionConfig:
 
 @dataclass
 class DigestConfig:
-    """Configuration for the morning digest feature."""
+    """Configuration for the daily digest feature (morning, midday, evening)."""
 
     enabled: bool = False
     schedule: str = "0 6 * * *"
+    schedules: Dict[str, str] = field(default_factory=lambda: {"morning": "0 6 * * *"})
     timezone: str = "America/Los_Angeles"
     persona: str = "jarvis"
     sections: List[str] = field(
@@ -1505,7 +1541,7 @@ class DigestConfig:
     honorific: str = "sir"
     voice_id: str = ""
     voice_speed: float = 1.0
-    tts_backend: str = "cartesia"
+    tts_backend: str = "openai_tts"
     messages: DigestSectionConfig = field(
         default_factory=lambda: DigestSectionConfig(
             sources=["gmail", "slack", "google_tasks"]
@@ -1555,6 +1591,8 @@ class JarvisConfig:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     digest: DigestConfig = field(default_factory=DigestConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
+    checkin: CheckinConfig = field(default_factory=CheckinConfig)
+    alerts: AlertsConfig = field(default_factory=AlertsConfig)
     mining: Optional["MiningConfig"] = None
 
     @property
@@ -1812,6 +1850,8 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
             "agent_manager",
             "digest",
             "proactive",
+            "checkin",
+            "alerts",
             "memory_files",
             "system_prompt",
             "compression",

@@ -149,7 +149,12 @@ class AgentScheduler:
             self._stop_event.wait(self._tick_interval)
 
     def _check_due_agents(self) -> None:
-        """Check all registered agents and fire those that are due."""
+        """Check all registered agents and fire those that are due.
+
+        Each tick is dispatched in its own thread so long-running agents
+        (like the check-in agent which polls for iMessage replies) don't
+        block the scheduler loop and prevent other agents from firing.
+        """
         now = time.time()
 
         with self._lock:
@@ -170,13 +175,8 @@ class AgentScheduler:
             ):
                 continue
 
-            logger.info("Firing tick for agent %s", agent_id)
-            try:
-                self._executor.execute_tick(agent_id)
-            except Exception:
-                logger.exception("Error executing tick for agent %s", agent_id)
-
-            # Update next fire time
+            # Update next fire time BEFORE dispatching so the scheduler
+            # doesn't try to re-fire on the next tick cycle.
             with self._lock:
                 if agent_id in self._agents:
                     if info["schedule_type"] == "cron":
@@ -189,6 +189,21 @@ class AgentScheduler:
                             info["schedule_value"]
                         )
                     # Manual: stays at inf
+
+            logger.info("Firing tick for agent %s (threaded)", agent_id)
+            threading.Thread(
+                target=self._fire_tick,
+                args=(agent_id,),
+                daemon=True,
+                name=f"tick-{agent_id[:8]}",
+            ).start()
+
+    def _fire_tick(self, agent_id: str) -> None:
+        """Execute a single agent tick (runs in its own thread)."""
+        try:
+            self._executor.execute_tick(agent_id)
+        except Exception:
+            logger.exception("Error executing tick for agent %s", agent_id)
 
     def _reconcile(self) -> None:
         """Check running agents for stalls and handle retries."""

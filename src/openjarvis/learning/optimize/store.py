@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from openjarvis.core.db import open_db
+
 from openjarvis.learning.optimize.types import (
     BenchmarkScore,
     OptimizationRun,
@@ -92,8 +94,7 @@ class OptimizationStore:
 
     def __init__(self, db_path: Union[str, Path]) -> None:
         self._db_path = str(db_path)
-        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn = open_db(db_path)
         self._conn.execute(_CREATE_RUNS)
         self._conn.execute(_CREATE_TRIALS)
         self._conn.commit()

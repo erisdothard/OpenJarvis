@@ -398,6 +398,18 @@ def _run_agent(
             memory_files_config=memory_files_config or config.memory_files,
             system_prompt_config=config.system_prompt,
         )
+    elif "system_prompt" in _inspect.signature(agent_cls.__init__).parameters:
+        # For agents like OrchestratorAgent that accept system_prompt but not
+        # prompt_builder: build the persona-enriched prompt and pass it directly.
+        from openjarvis.prompt.builder import SystemPromptBuilder
+
+        _builder = SystemPromptBuilder(
+            agent_template=config.agent.default_system_prompt or "",
+            memory_files_config=memory_files_config or config.memory_files,
+            system_prompt_config=config.system_prompt,
+        )
+        _built = _builder.build()
+        agent_kwargs["system_prompt"] = _built
 
     agent = agent_cls(engine, model_name, **agent_kwargs)
     # Hold MCP transports alive for the agent's lifetime — without this

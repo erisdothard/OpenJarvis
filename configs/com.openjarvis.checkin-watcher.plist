@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Phase 2: Watch for check-in replies.
+  Runs every 120 seconds. Checks for replies, processes, exits.
+  Only does work when a check-in is active (state file exists).
+
+  INSTALL:
+    cp configs/com.openjarvis.checkin-watcher.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.openjarvis.checkin-watcher.plist
+
+  LOGS:
+    tail -f ~/.openjarvis/logs/checkin-watcher.log
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.openjarvis.checkin-watcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/erisdothard/OpenJarvis/.venv/bin/python3</string>
+        <string>/Users/erisdothard/OpenJarvis/scripts/checkin_watcher.py</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>120</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/erisdothard/.openjarvis/logs/checkin-watcher.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/erisdothard/.openjarvis/logs/checkin-watcher.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

@@ -142,4 +142,64 @@ try:
 except ImportError:
     pass
 
+try:
+    import openjarvis.tools.job_search_web  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.linkedin  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.jobright  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.connector_tools  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.competitor_monitor  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.social_publish  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.content_draft  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.competitor_scraper  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.ad_library_search  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.content_remix  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.opportunity_finder  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.linkedin_daily  # noqa: F401
+except ImportError:
+    pass
+
 __all__ = ["BaseTool", "ToolExecutor", "ToolSpec"]

@@ -83,7 +83,7 @@ def send_imessage(chat_identifier: str, message: str) -> bool:
             ["osascript", "-e", script],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=120,
             check=False,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):

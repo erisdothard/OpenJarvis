@@ -227,7 +227,7 @@ class HybridSearch:
         if not fts_query:
             return []
         sql = f"""
-            SELECT kc.id, abs(bm25(knowledge_fts)) AS score
+            SELECT kc.id, -bm25(knowledge_fts) AS score
             FROM knowledge_fts
             JOIN knowledge_chunks kc ON knowledge_fts.rowid = kc.rowid
             WHERE knowledge_fts MATCH ?

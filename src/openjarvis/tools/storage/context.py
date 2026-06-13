@@ -15,14 +15,31 @@ class ContextConfig:
     """Controls how retrieved context is injected into prompts."""
 
     enabled: bool = True
-    top_k: int = 5
-    min_score: float = 0.0
-    max_context_tokens: int = 2048
+    top_k: int = 3        # 3 high-quality chunks > 5 mediocre
+    min_score: float = 1.0  # filter near-noise BM25 results
+    max_context_tokens: int = 1024  # halved for meaningful token savings
 
 
 def _count_tokens(text: str) -> int:
     """Approximate token count via whitespace split."""
     return len(text.split())
+
+
+def _filter_by_score_drop(
+    results: List[RetrievalResult],
+    drop_threshold: float = 0.5,
+) -> List[RetrievalResult]:
+    """Drop results where score / top_score < threshold.
+
+    Handles edge cases:
+    - Empty list → returns as-is.
+    - Top score is zero or negative → returns as-is (can't compute ratio safely).
+    - All results at the same score → all pass (ratio == 1.0).
+    """
+    if not results or results[0].score <= 0:
+        return results
+    top = results[0].score
+    return [r for r in results if r.score / top >= drop_threshold]
 
 
 def format_context(results: List[RetrievalResult]) -> str:
@@ -77,7 +94,13 @@ def inject_context(
     messages:
         The existing message list.
     backend:
-        The memory backend to search.
+        The memory backend to search. Currently accepts any ``MemoryBackend``
+        (plain BM25 via KnowledgeStore). To use hybrid search, the caller
+        would need to pass a ``HybridSearch`` instance that also implements
+        ``MemoryBackend.retrieve()``.
+        TODO(phase-4d): Thread ``app.state.hybrid_search`` through routes.py
+        and pass it here so retrieval benefits from combined BM25 + vector
+        scoring without changing this function's signature.
     config:
         Context injection settings (uses defaults if ``None``).
     """
@@ -89,6 +112,9 @@ def inject_context(
 
     # Filter by minimum score
     results = [r for r in results if r.score >= cfg.min_score]
+
+    # Drop results that score significantly below the top result
+    results = _filter_by_score_drop(results)
 
     if not results:
         return messages

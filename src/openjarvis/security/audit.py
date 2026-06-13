@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 from openjarvis.core.config import DEFAULT_CONFIG_DIR
+from openjarvis.core.db import open_db
 from openjarvis.core.events import Event, EventBus, EventType
 from openjarvis.security.types import (
     ScanFinding,
@@ -39,7 +39,7 @@ class AuditLogger:
         from openjarvis.security.file_utils import secure_create
 
         secure_create(self._db_path)
-        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        self._conn = open_db(self._db_path)
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS security_events (

@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import json
-import sqlite3
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from openjarvis.core.db import open_db
 
 
 @dataclass
 class DigestArtifact:
-    """A pre-computed morning digest ready for delivery."""
+    """A pre-computed digest ready for delivery."""
 
     text: str
     audio_path: Path
@@ -23,6 +24,8 @@ class DigestArtifact:
     voice_used: str
     quality_score: float = 0.0
     evaluator_feedback: str = ""
+    digest_type: str = "morning"  # "morning" | "midday" | "evening"
+    follow_up_questions: List[str] = field(default_factory=list)
 
 
 class DigestStore:
@@ -32,8 +35,7 @@ class DigestStore:
         if not db_path:
             db_path = str(Path.home() / ".openjarvis" / "digest.db")
         self._db_path = db_path
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn = open_db(db_path)
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS digests (
@@ -68,6 +70,16 @@ class DigestStore:
                 "ALTER TABLE digests"
                 " ADD COLUMN evaluator_feedback TEXT NOT NULL DEFAULT ''"
             )
+        if "digest_type" not in existing:
+            self._conn.execute(
+                "ALTER TABLE digests"
+                " ADD COLUMN digest_type TEXT NOT NULL DEFAULT 'morning'"
+            )
+        if "follow_up_questions" not in existing:
+            self._conn.execute(
+                "ALTER TABLE digests"
+                " ADD COLUMN follow_up_questions TEXT NOT NULL DEFAULT '[]'"
+            )
 
     def save(self, artifact: DigestArtifact) -> None:
         """Save a digest artifact."""
@@ -76,8 +88,9 @@ class DigestStore:
             INSERT INTO digests
                 (text, audio_path, sections, sources_used,
                  generated_at, model_used, voice_used,
-                 quality_score, evaluator_feedback)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 quality_score, evaluator_feedback, digest_type,
+                 follow_up_questions)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 artifact.text,
@@ -89,6 +102,8 @@ class DigestStore:
                 artifact.voice_used,
                 artifact.quality_score,
                 artifact.evaluator_feedback,
+                artifact.digest_type,
+                json.dumps(artifact.follow_up_questions),
             ),
         )
         self._conn.commit()
@@ -104,22 +119,40 @@ class DigestStore:
             voice_used=row[6],
             quality_score=row[7] if len(row) > 7 else 0.0,
             evaluator_feedback=row[8] if len(row) > 8 else "",
+            digest_type=row[9] if len(row) > 9 else "morning",
+            follow_up_questions=(
+                json.loads(row[10]) if len(row) > 10 and row[10] else []
+            ),
         )
 
-    def get_latest(self) -> Optional[DigestArtifact]:
-        """Return the most recent digest, or None."""
-        row = self._conn.execute(
-            "SELECT text, audio_path, sections, sources_used,"
-            " generated_at, model_used, voice_used,"
-            " quality_score, evaluator_feedback"
-            " FROM digests ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+    _SELECT_COLS = (
+        "text, audio_path, sections, sources_used,"
+        " generated_at, model_used, voice_used,"
+        " quality_score, evaluator_feedback, digest_type,"
+        " follow_up_questions"
+    )
+
+    def get_latest(self, digest_type: str = "") -> Optional[DigestArtifact]:
+        """Return the most recent digest, optionally filtered by type."""
+        if digest_type:
+            row = self._conn.execute(
+                f"SELECT {self._SELECT_COLS}"
+                " FROM digests WHERE digest_type = ? ORDER BY id DESC LIMIT 1",
+                (digest_type,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                f"SELECT {self._SELECT_COLS}"
+                " FROM digests ORDER BY id DESC LIMIT 1"
+            ).fetchone()
         if row is None:
             return None
         return self._row_to_artifact(row)
 
-    def get_today(self, timezone_name: str = "UTC") -> Optional[DigestArtifact]:
-        """Return today's digest if it exists, or None."""
+    def get_today(
+        self, timezone_name: str = "UTC", digest_type: str = ""
+    ) -> Optional[DigestArtifact]:
+        """Return today's digest if it exists, optionally filtered by type."""
         try:
             from zoneinfo import ZoneInfo
 
@@ -127,27 +160,57 @@ class DigestStore:
         except ImportError:
             today = datetime.now().strftime("%Y-%m-%d")
 
-        row = self._conn.execute(
-            "SELECT text, audio_path, sections, sources_used,"
-            " generated_at, model_used, voice_used,"
-            " quality_score, evaluator_feedback"
-            " FROM digests WHERE generated_at LIKE ? ORDER BY id DESC LIMIT 1",
-            (f"{today}%",),
-        ).fetchone()
+        if digest_type:
+            row = self._conn.execute(
+                f"SELECT {self._SELECT_COLS}"
+                " FROM digests WHERE generated_at LIKE ?"
+                " AND digest_type = ? ORDER BY id DESC LIMIT 1",
+                (f"{today}%", digest_type),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                f"SELECT {self._SELECT_COLS}"
+                " FROM digests WHERE generated_at LIKE ?"
+                " ORDER BY id DESC LIMIT 1",
+                (f"{today}%",),
+            ).fetchone()
         if row is None:
             return None
         return self._row_to_artifact(row)
 
-    def history(self, limit: int = 10) -> List[DigestArtifact]:
-        """Return the N most recent digests."""
-        rows = self._conn.execute(
-            "SELECT text, audio_path, sections, sources_used,"
-            " generated_at, model_used, voice_used,"
-            " quality_score, evaluator_feedback"
-            " FROM digests ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+    def history(self, limit: int = 10, digest_type: str = "") -> List[DigestArtifact]:
+        """Return the N most recent digests, optionally filtered by type."""
+        if digest_type:
+            rows = self._conn.execute(
+                f"SELECT {self._SELECT_COLS}"
+                " FROM digests WHERE digest_type = ? ORDER BY id DESC LIMIT ?",
+                (digest_type, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                f"SELECT {self._SELECT_COLS}"
+                " FROM digests ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
         return [self._row_to_artifact(r) for r in rows]
+
+    def purge(self, max_age_days: int = 14) -> int:
+        """Delete digest rows older than *max_age_days*.
+
+        ``generated_at`` is stored as an ISO 8601 string (e.g.
+        ``"2025-06-01T08:00:00"``).  ISO strings sort lexicographically in
+        the same order as time, so a plain string comparison is correct.
+
+        Returns the number of rows deleted.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        ).isoformat()
+        cur = self._conn.execute(
+            "DELETE FROM digests WHERE generated_at < ?", (cutoff,)
+        )
+        self._conn.commit()
+        return cur.rowcount
 
     def close(self) -> None:
         self._conn.close()

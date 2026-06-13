@@ -19,6 +19,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from openjarvis.core.db import open_db
+
 # ---------------------------------------------------------------------------
 # Decision constants
 # ---------------------------------------------------------------------------
@@ -150,8 +152,7 @@ class ApprovalStore:
             db_path = str(Path.home() / ".openjarvis" / "approvals.db")
         self._db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn = open_db(db_path)
         self._create_tables()
         self._conn.commit()
 

@@ -199,11 +199,14 @@ class AppleContactsConnector(BaseConnector):
             paths.append(self._db_path)
         # Source databases (iCloud, Exchange, etc.)
         sources_dir = self._db_path.parent / "Sources"
-        if sources_dir.is_dir():
-            for child in sorted(sources_dir.iterdir()):
-                candidate = child / _DB_FILENAME
-                if candidate.exists():
-                    paths.append(candidate)
+        try:
+            if sources_dir.is_dir():
+                for child in sorted(sources_dir.iterdir()):
+                    candidate = child / _DB_FILENAME
+                    if candidate.exists():
+                        paths.append(candidate)
+        except PermissionError:
+            pass  # Full Disk Access not granted — skip Sources
         return paths
 
     @staticmethod

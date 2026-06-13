@@ -29,6 +29,13 @@ class EscalateError(AgentTickError):
     needs_human = True
 
 
+class QuotaExhaustedError(AgentTickError):
+    """Model quota exhausted — should advance to next model in fallback chain."""
+
+    retryable = False
+    fallback_eligible = True
+
+
 _RETRYABLE_PATTERNS = (
     "rate limit",
     "rate_limit",
@@ -42,6 +49,16 @@ _RETRYABLE_PATTERNS = (
     "503",
     "429",
     "502",
+)
+
+_QUOTA_EXHAUSTED_PATTERNS = (
+    "quota",
+    "resource_exhausted",
+    "resource exhausted",
+    "daily limit",
+    "exceeded your current",
+    "billing",
+    "insufficient_quota",
 )
 
 _FATAL_PATTERNS = (
@@ -62,6 +79,16 @@ def classify_error(exc: Exception) -> AgentTickError:
     if isinstance(exc, AgentTickError):
         return exc
 
+    # EngineConnectionError means the provider is unavailable/unconfigured —
+    # advance to next model in the fallback chain, don't retry the same one.
+    try:
+        from openjarvis.engine._base import EngineConnectionError
+
+        if isinstance(exc, EngineConnectionError):
+            return QuotaExhaustedError(str(exc))
+    except ImportError:
+        pass
+
     msg = str(exc).lower()
 
     # Check fatal patterns first (more specific)
@@ -70,6 +97,13 @@ def classify_error(exc: Exception) -> AgentTickError:
     for pattern in _FATAL_PATTERNS:
         if pattern in msg:
             return FatalError(str(exc))
+
+    # Quota exhaustion: 429/rate-limit + quota-specific language
+    is_rate_limit = any(
+        p in msg for p in ("429", "rate limit", "rate_limit", "too many requests")
+    )
+    if is_rate_limit and any(p in msg for p in _QUOTA_EXHAUSTED_PATTERNS):
+        return QuotaExhaustedError(str(exc))
 
     # Check retryable patterns
     if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
@@ -89,6 +123,8 @@ def retry_delay(attempt: int) -> int:
 
 def suggest_action(error: AgentTickError) -> str:
     """Return a human-readable suggested action for the given error."""
+    if isinstance(error, QuotaExhaustedError):
+        return "Model quota exhausted across entire fallback chain \u2014 check API quotas or add models to fallback chain"
     msg = str(error).lower()
     if any(p in msg for p in ("rate limit", "rate_limit", "429", "too many requests")):
         return "Rate limited \u2014 agent will auto-retry on next tick"

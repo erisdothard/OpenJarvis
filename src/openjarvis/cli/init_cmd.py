@@ -474,8 +474,8 @@ schedule = "0 7 * * *"
 timezone = "America/Los_Angeles"
 persona = "jarvis"
 honorific = "sir"
-tts_backend = "cartesia"
-voice_id = "c8f7835e-28a3-4f0c-80d7-c1302ac62aae"
+tts_backend = "openai_tts"
+voice_id = "fable"
 voice_speed = 1.2
 sections = ["health", "messages", "calendar", "world"]
 

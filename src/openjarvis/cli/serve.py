@@ -106,6 +106,11 @@ def serve(
     agent_name: str | None,
 ) -> None:
     """Start the OpenAI-compatible API server."""
+    # Set up rotating log files for background/daemon operation
+    from openjarvis.cli.log_config import setup_server_logging
+
+    setup_server_logging()
+
     print_banner(quiet=(ctx.obj or {}).get("quiet", False))
     console = Console(stderr=True)
 
@@ -122,6 +127,27 @@ def serve(
         sys.exit(1)
 
     config = load_config()
+
+    # Audit sensitive file permissions and clean up orphan databases
+    try:
+        from openjarvis.core.config import DEFAULT_CONFIG_DIR
+        from openjarvis.security.file_utils import audit_config_permissions
+
+        _corrected = audit_config_permissions(DEFAULT_CONFIG_DIR)
+        if _corrected:
+            logger.debug(
+                "Corrected permissions on %d sensitive file(s): %s",
+                len(_corrected),
+                ", ".join(_corrected),
+            )
+
+        # Remove zero-byte orphan checkpoint database left by prior runs
+        orphan = DEFAULT_CONFIG_DIR / "sync_checkpoints.db"
+        if orphan.exists() and orphan.stat().st_size == 0:
+            orphan.unlink()
+            logger.debug("Removed empty orphan: %s", orphan)
+    except Exception as _perm_exc:
+        logger.debug("Startup permission audit failed: %s", _perm_exc)
 
     # Resolve host/port from CLI args or config
     bind_host = host or config.server.host
@@ -166,6 +192,20 @@ def serve(
     # MultiEngine after local discovery so healthy local fallbacks such as
     # Ollama stay visible even when the configured preferred engine is MLX.
     import os
+    from pathlib import Path as _Path
+
+    # Pre-load API keys from cloud-keys.env so they're available for
+    # the _has_cloud check even when the server is started outside of
+    # a login shell (e.g. start.sh, launchd).
+    _keys_file = _Path.home() / ".openjarvis" / "cloud-keys.env"
+    if _keys_file.exists():
+        for _raw_line in _keys_file.read_text().splitlines():
+            _line = _raw_line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                _k, _v = _k.strip(), _v.strip()
+                if _v and not os.environ.get(_k):
+                    os.environ[_k] = _v
 
     cloud_engine = None
     _has_cloud = (
@@ -576,6 +616,55 @@ def serve(
             )
             executor.set_system(system)
 
+            # Auto-create digest managed agents for each configured schedule
+            # (morning, midday, evening) if digest is enabled.
+            if getattr(config, "digest", None) and getattr(config.digest, "enabled", False):
+                existing_agents = agent_manager.list_agents()
+                existing_names = {a.get("name", "") for a in existing_agents}
+                schedules = getattr(config.digest, "schedules", {})
+                if not schedules:
+                    schedules = {"morning": getattr(config.digest, "schedule", "0 6 * * *")}
+                _digest_labels = {
+                    "morning": "Morning Digest",
+                    "midday": "Midday Check-In",
+                    "evening": "Evening Circle-Back",
+                }
+                for dtype, cron in schedules.items():
+                    agent_name = _digest_labels.get(dtype, f"{dtype.title()} Digest")
+                    if agent_name not in existing_names:
+                        agent_manager.create_agent(
+                            name=agent_name,
+                            agent_type="morning_digest",
+                            config={
+                                "model": "groq/llama-3.3-70b-versatile",
+                                "model_fallback_chain": "groq/llama-3.3-70b-versatile,qwen3:8b",
+                                "schedule_type": "cron",
+                                "schedule_value": cron,
+                                "digest_type": dtype,
+                                "tools": ["digest_collect"],
+                            },
+                        )
+                        console.print(f"  {agent_name}: [cyan]auto-registered[/cyan]")
+
+            # Auto-create check-in managed agent if enabled
+            if getattr(config, "checkin", None) and getattr(config.checkin, "enabled", False):
+                existing_agents = agent_manager.list_agents()
+                existing_names = {a.get("name", "") for a in existing_agents}
+                if "Daily Check-In" not in existing_names:
+                    agent_manager.create_agent(
+                        name="Daily Check-In",
+                        agent_type="checkin",
+                        config={
+                            "model": model_name,
+                            "schedule_type": "cron",
+                            "schedule_value": config.checkin.schedule,
+                            "phone": config.checkin.phone,
+                            "timezone": config.checkin.timezone,
+                            "reply_timeout_minutes": config.checkin.reply_timeout_minutes,
+                        },
+                    )
+                    console.print("  Check-In:  [cyan]auto-registered (4 PM daily)[/cyan]")
+
             agent_scheduler = AgentScheduler(
                 manager=agent_manager,
                 executor=executor,
@@ -592,6 +681,135 @@ def serve(
             console.print("  Scheduler: [cyan]active[/cyan]")
         except Exception as exc:
             logger.debug("Agent scheduler init failed: %s", exc)
+
+    # Start reminder/calendar notifier (texts you when items are due)
+    if getattr(config, "checkin", None) and getattr(config.checkin, "phone", ""):
+        try:
+            from openjarvis.agents.reminder_notifier import start_notifier
+
+            start_notifier(config.checkin.phone)
+            console.print("  Notifier:  [cyan]active (reminders + calendar)[/cyan]")
+        except Exception as exc:
+            logger.debug("Reminder notifier init failed: %s", exc)
+
+    # Start social post scheduler (publishes approved posts on schedule)
+    try:
+        import threading
+        from openjarvis.tools.social_publish import run_social_scheduler
+
+        def _social_scheduler_loop():
+            import time as _time
+            while True:
+                try:
+                    run_social_scheduler()
+                except Exception as exc:
+                    logger.debug("Social scheduler tick error: %s", exc)
+                _time.sleep(60)
+
+        _social_thread = threading.Thread(
+            target=_social_scheduler_loop, daemon=True, name="social-scheduler"
+        )
+        _social_thread.start()
+    except Exception as exc:
+        logger.debug("Social scheduler init failed: %s", exc)
+
+    # Set up memory backend for context injection
+    memory_backend = None
+    if config.agent.context_from_memory:
+        try:
+            import openjarvis.tools.storage  # noqa: F401
+            import openjarvis.connectors.store  # noqa: F401  # register "knowledge" backend
+            from openjarvis.core.registry import MemoryRegistry
+
+            mem_key = config.memory.default_backend
+            if MemoryRegistry.contains(mem_key):
+                memory_backend = MemoryRegistry.create(
+                    mem_key,
+                    db_path=config.memory.db_path,
+                )
+                console.print("  Memory:    [cyan]active[/cyan]")
+        except Exception as exc:
+            logger.debug("Memory backend init failed: %s", exc)
+
+    # --- Connector SyncScheduler: periodic re-sync for data sources ---
+    sync_scheduler = None
+    if memory_backend is not None:
+        try:
+            from openjarvis.connectors.pipeline import IngestionPipeline
+            from openjarvis.connectors.scheduler import SyncScheduler
+            from openjarvis.connectors.store import KnowledgeStore
+            from openjarvis.connectors.sync_engine import SyncEngine
+            from openjarvis.core.registry import ConnectorRegistry
+
+            import openjarvis.connectors  # noqa: F401  # trigger registration
+
+            # Build the sync pipeline targeting the same KnowledgeStore
+            # the memory backend reads from.
+            _sync_store = KnowledgeStore(db_path=config.memory.db_path)
+            _sync_pipeline = IngestionPipeline(store=_sync_store)
+            _sync_engine = SyncEngine(pipeline=_sync_pipeline)
+
+            # Default: sync every hour (3600s). Config knob via raw TOML.
+            _sync_interval = 3600
+            try:
+                import tomllib as _toml
+                from openjarvis.core.config import DEFAULT_CONFIG_PATH
+
+                _cfg_path = DEFAULT_CONFIG_PATH
+                if _cfg_path.exists():
+                    with open(_cfg_path, "rb") as _sf:
+                        _raw_toml = _toml.load(_sf)
+                    _sync_interval = int(
+                        _raw_toml.get("connectors", {})
+                        .get("sync_interval", _sync_interval)
+                    )
+            except Exception:
+                pass
+
+            sync_scheduler = SyncScheduler(
+                _sync_engine, interval_seconds=_sync_interval
+            )
+
+            _registered = 0
+            for _cid in sorted(ConnectorRegistry.keys()):
+                try:
+                    _cls = ConnectorRegistry.get(_cid)
+                    _inst = _cls()
+                    if _inst.is_connected():
+                        sync_scheduler.add(_inst)
+                        _registered += 1
+                except Exception:
+                    pass
+
+            if _registered > 0:
+                # Run an immediate first sync in a background thread so
+                # server startup isn't blocked, then start the periodic loop.
+                import threading
+
+                def _initial_sync() -> None:
+                    try:
+                        results = sync_scheduler.run_once()
+                        total = sum(results.values())
+                        logger.info(
+                            "Initial sync complete: %d new items across %d connectors",
+                            total,
+                            len(results),
+                        )
+                    except Exception as exc:
+                        logger.error("Initial sync failed: %s", exc)
+
+                threading.Thread(
+                    target=_initial_sync, daemon=True, name="initial_sync"
+                ).start()
+                sync_scheduler.start()
+                console.print(
+                    f"  Sync:      [cyan]{_registered} connectors[/cyan] "
+                    f"(every {_sync_interval}s)"
+                )
+            else:
+                sync_scheduler = None
+        except Exception as exc:
+            logger.debug("SyncScheduler init failed: %s", exc)
 
     # --- Channel Gateway: API key, sessions, ChannelBridge ---
     import os as _os
@@ -669,6 +887,7 @@ def serve(
         speech_backend=speech_backend,
         agent_manager=agent_manager,
         agent_scheduler=agent_scheduler,
+        telem_store=telem_store,
         api_key=api_key,
         webhook_config=webhook_config,
         cors_origins=config.server.cors_origins,
@@ -696,6 +915,13 @@ def serve(
             "enabled on non-loopback interface. This allows any website to make "
             "authenticated requests to your instance."
         )
+
+    # --- Alerts: event-driven via /api/alert endpoint ---
+    # Calendar/reminder alerts: launchd → event_watcher.py → POST /api/alert
+    # Email alerts: Gmail Pub/Sub → gmail_push.py (started in app.py lifespan)
+    if config.alerts.enabled:
+        phone = config.alerts.phone or "+16152439891"
+        console.print(f"  Alerts:    [cyan]iMessage → {phone}[/cyan] (event-driven)")
 
     import uvicorn
 

@@ -1,201 +1,339 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from 'recharts';
-import { Zap, Activity, Thermometer, Hash, Gauge } from 'lucide-react';
-import { fetchEnergy, fetchTelemetry } from '../../lib/api';
-import { useAppStore } from '../../lib/store';
+  Calendar,
+  CheckSquare,
+  Mail,
+  Cloud,
+  HardDrive,
+  Server,
+  Clock,
+  AlertTriangle,
+} from 'lucide-react';
+import { fetchGlance } from '../../lib/api';
+import type { GlanceData } from '../../lib/api';
 
-interface EnergySample {
-  timestamp: string;
-  power_w: number;
-  energy_j: number;
-}
-
-interface EnergyData {
-  total_energy_j?: number;
-  energy_per_token_j?: number;
-  avg_power_w?: number;
-  samples?: EnergySample[];
-}
-
-interface TelemetryStats {
-  total_requests?: number;
-  total_tokens?: number;
-}
-
-interface ChartPoint {
-  time: string;
-  power: number;
-}
-
-function StatCard({
+function GlanceCard({
   icon: Icon,
   label,
-  value,
-  unit,
+  children,
+  accent,
 }: {
-  icon: typeof Zap;
+  icon: typeof Calendar;
   label: string;
-  value: string;
-  unit?: string;
+  children: React.ReactNode;
+  accent?: string;
 }) {
   return (
-    <div className="hud-panel p-4">
+    <div className="hud-panel p-4" style={{ minHeight: 90 }}>
       <div className="flex items-center gap-2 mb-2">
-        <Icon size={12} style={{ color: 'var(--color-accent)' }} />
+        <Icon size={12} style={{ color: accent || 'var(--color-accent)' }} />
         <span className="hud-label">{label}</span>
       </div>
-      <div className="hud-mono text-2xl font-semibold truncate" style={{ color: 'var(--color-text)' }}>
-        {value}
-        {unit && (
-          <span className="hud-label ml-1" style={{ fontSize: '0.625rem', letterSpacing: '0.18em' }}>
-            {unit}
-          </span>
-        )}
-      </div>
+      <div style={{ color: 'var(--color-text)' }}>{children}</div>
+    </div>
+  );
+}
+
+function DiskBar({ percent }: { percent: number }) {
+  const color =
+    percent > 90
+      ? 'var(--color-error, #ef4444)'
+      : percent > 75
+        ? 'var(--color-warning, #f59e0b)'
+        : 'var(--color-accent, #38bdf8)';
+  return (
+    <div
+      style={{
+        height: 6,
+        borderRadius: 3,
+        background: 'rgba(255,255,255,0.06)',
+        marginTop: 6,
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        style={{
+          height: '100%',
+          width: `${percent}%`,
+          background: color,
+          borderRadius: 3,
+          transition: 'width 300ms ease',
+        }}
+      />
     </div>
   );
 }
 
 export function EnergyDashboard() {
-  const savings = useAppStore((s) => s.savings);
-  const [energy, setEnergy] = useState<EnergyData | null>(null);
-  const [telemetry, setTelemetry] = useState<TelemetryStats | null>(null);
-  const [chartData, setChartData] = useState<ChartPoint[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<GlanceData | null>(null);
+  const [error, setError] = useState(false);
 
-  const fetchData = useCallback(async () => {
-    try {
-      const [energyRes, telRes] = await Promise.allSettled([
-        fetchEnergy().catch(() => null),
-        fetchTelemetry().catch(() => null),
-      ]);
-
-      if (energyRes.status === 'fulfilled' && energyRes.value) {
-        const data = energyRes.value as EnergyData;
-        setEnergy(data);
-        if (data.samples) {
-          setChartData(
-            data.samples.map((s) => ({
-              time: new Date(s.timestamp).toLocaleTimeString(),
-              power: Math.round(s.power_w * 10) / 10,
-            })),
-          );
-        }
-        setError(null);
-      }
-      if (telRes.status === 'fulfilled' && telRes.value) {
-        setTelemetry(telRes.value as TelemetryStats);
-      }
-    } catch {
-      setError('Cannot connect to server');
+  const load = useCallback(async () => {
+    const result = await fetchGlance();
+    if (result) {
+      setData(result);
+      setError(false);
+    } else {
+      setError(true);
     }
   }, []);
 
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
+    load();
+    const interval = setInterval(load, 30_000);
     return () => clearInterval(interval);
-  }, [fetchData]);
+  }, [load]);
 
-  const thermalStatus = (energy?.avg_power_w ?? 0) < 50
-    ? { label: 'Cool', color: 'var(--color-success)' }
-    : (energy?.avg_power_w ?? 0) < 150
-    ? { label: 'Warm', color: 'var(--color-warning)' }
-    : { label: 'Hot', color: 'var(--color-error)' };
-
-  if (error || !energy) {
+  if (error || !data) {
     return (
       <div className="hud-panel p-6">
         <h3 className="hud-label flex items-center gap-2 mb-4">
-          <Zap size={12} style={{ color: 'var(--color-accent)' }} />
-          Energy Monitoring
+          <Clock size={12} style={{ color: 'var(--color-accent)' }} />
+          Status
         </h3>
-        <div className="h-48 flex items-center justify-center text-sm" style={{ color: 'var(--color-text-tertiary)' }}>
-          <span className="hud-mono">{error || 'awaiting telemetry stream…'}</span>
+        <div
+          className="h-48 flex items-center justify-center text-sm"
+          style={{ color: 'var(--color-text-tertiary)' }}
+        >
+          <span className="hud-mono">
+            {error ? 'cannot connect to server' : 'loading…'}
+          </span>
         </div>
       </div>
     );
   }
 
+  const overdueCount = data.reminders.filter((r) => r.overdue).length;
+  const upcomingReminders = data.reminders.filter((r) => !r.overdue);
+
   return (
     <div className="hud-panel p-6">
       <h3 className="hud-label flex items-center gap-2 mb-4">
-        <Zap size={12} style={{ color: 'var(--color-accent)' }} />
-        Energy Monitoring
+        <Clock size={12} style={{ color: 'var(--color-accent)' }} />
+        At a Glance
       </h3>
 
-      <div className="grid grid-cols-2 gap-3 mb-4">
-        <StatCard
-          icon={Zap}
-          label="Total Energy"
-          value={((energy.total_energy_j ?? 0) / 1000).toFixed(1)}
-          unit="kJ"
-        />
-        <StatCard
-          icon={Activity}
-          label="Energy / Token"
-          value={(energy.energy_per_token_j ?? 0).toFixed(3)}
-          unit="J"
-        />
-        <StatCard
-          icon={Thermometer}
-          label="Avg Power"
-          value={(energy.avg_power_w ?? 0).toFixed(1)}
-          unit="W"
-        />
-        <StatCard
-          icon={Hash}
-          label="Total Requests"
-          value={String(savings?.total_calls ?? telemetry?.total_requests ?? 0)}
-        />
-        <StatCard
-          icon={Gauge}
-          label="Thermal"
-          value={thermalStatus.label}
-        />
-        <StatCard
-          icon={Hash}
-          label="Tokens Processed"
-          value={formatNumber(savings?.total_tokens ?? telemetry?.total_tokens ?? 0)}
-        />
-      </div>
+      <div className="grid grid-cols-2 gap-3">
+        {/* Today's Schedule */}
+        <GlanceCard icon={Calendar} label="Today">
+          {data.calendar.length === 0 ? (
+            <div className="hud-mono text-sm" style={{ color: 'var(--color-text-tertiary)' }}>
+              No events today
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {data.calendar.slice(0, 4).map((e, i) => (
+                <div key={i} style={{ fontSize: 13, lineHeight: 1.4 }}>
+                  <span style={{ fontWeight: 500 }}>{e.summary}</span>
+                  {!e.all_day && e.start && (
+                    <span
+                      className="hud-mono"
+                      style={{
+                        marginLeft: 6,
+                        fontSize: 11,
+                        color: 'var(--color-text-tertiary)',
+                      }}
+                    >
+                      {formatEventTime(e.start)}
+                    </span>
+                  )}
+                </div>
+              ))}
+              {data.calendar.length > 4 && (
+                <span
+                  className="hud-mono"
+                  style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}
+                >
+                  +{data.calendar.length - 4} more
+                </span>
+              )}
+            </div>
+          )}
+        </GlanceCard>
 
-      {/* Chart */}
-      {chartData.length > 1 && (
-        <div className="h-48">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-              <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--color-text-tertiary)' }} />
-              <YAxis tick={{ fontSize: 10, fill: 'var(--color-text-tertiary)' }} unit="W" />
-              <Tooltip
-                contentStyle={{
-                  background: 'var(--color-surface)',
-                  border: '1px solid var(--color-border)',
-                  borderRadius: 'var(--radius-md)',
-                  fontSize: 12,
-                  color: 'var(--color-text)',
+        {/* Reminders */}
+        <GlanceCard
+          icon={overdueCount > 0 ? AlertTriangle : CheckSquare}
+          label={`Reminders${overdueCount > 0 ? ` · ${overdueCount} overdue` : ''}`}
+          accent={overdueCount > 0 ? 'var(--color-warning, #f59e0b)' : undefined}
+        >
+          {data.reminders.length === 0 ? (
+            <div className="hud-mono text-sm" style={{ color: 'var(--color-text-tertiary)' }}>
+              All clear
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+              {data.reminders
+                .sort((a, b) => (a.overdue === b.overdue ? 0 : a.overdue ? -1 : 1))
+                .slice(0, 4)
+                .map((r, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      fontSize: 13,
+                      lineHeight: 1.4,
+                      color: r.overdue
+                        ? 'var(--color-warning, #f59e0b)'
+                        : 'var(--color-text)',
+                    }}
+                  >
+                    {r.name}
+                  </div>
+                ))}
+              {data.reminders.length > 4 && (
+                <span
+                  className="hud-mono"
+                  style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}
+                >
+                  +{data.reminders.length - 4} more
+                </span>
+              )}
+            </div>
+          )}
+        </GlanceCard>
+
+        {/* Email */}
+        <GlanceCard icon={Mail} label="Inbox">
+          <div className="hud-mono text-2xl font-semibold">
+            {data.unread_emails !== null ? data.unread_emails : '—'}
+            <span
+              className="hud-label ml-2"
+              style={{ fontSize: '0.625rem', letterSpacing: '0.18em' }}
+            >
+              UNREAD
+            </span>
+          </div>
+        </GlanceCard>
+
+        {/* Weather */}
+        <GlanceCard icon={Cloud} label={data.weather?.location || 'Weather'}>
+          {data.weather ? (
+            <div>
+              <span className="hud-mono text-2xl font-semibold">
+                {data.weather.temp_f}°
+              </span>
+              <span
+                style={{
+                  marginLeft: 8,
+                  fontSize: 13,
+                  color: 'var(--color-text-secondary)',
+                }}
+              >
+                {data.weather.condition}
+              </span>
+              <div
+                className="hud-mono"
+                style={{
+                  fontSize: 11,
+                  color: 'var(--color-text-tertiary)',
+                  marginTop: 2,
+                }}
+              >
+                Feels like {data.weather.feels_like_f}° · {data.weather.humidity}% humidity
+              </div>
+            </div>
+          ) : (
+            <div className="hud-mono text-sm" style={{ color: 'var(--color-text-tertiary)' }}>
+              Unavailable
+            </div>
+          )}
+        </GlanceCard>
+
+        {/* Disk */}
+        <GlanceCard icon={HardDrive} label="Disk">
+          <div className="hud-mono text-2xl font-semibold">
+            {data.disk.free_gb}
+            <span
+              className="hud-label ml-1"
+              style={{ fontSize: '0.625rem', letterSpacing: '0.18em' }}
+            >
+              GB FREE
+            </span>
+          </div>
+          <DiskBar percent={data.disk.percent_used} />
+          <div
+            className="hud-mono"
+            style={{
+              fontSize: 11,
+              color: 'var(--color-text-tertiary)',
+              marginTop: 4,
+            }}
+          >
+            {data.disk.used_gb} / {data.disk.total_gb} GB used
+          </div>
+        </GlanceCard>
+
+        {/* Ollama */}
+        <GlanceCard icon={Server} label="Ollama">
+          {data.ollama.running ? (
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                <span
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    background: 'var(--color-success, #22c55e)',
+                    display: 'inline-block',
+                  }}
+                />
+                <span className="hud-mono" style={{ fontSize: 13, fontWeight: 500 }}>
+                  Running
+                </span>
+              </div>
+              {data.ollama.models.length > 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {data.ollama.models.map((m, i) => (
+                    <span
+                      key={i}
+                      className="hud-mono"
+                      style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}
+                    >
+                      {m.name} ({m.size_gb}GB)
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <span
+                  className="hud-mono"
+                  style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}
+                >
+                  No models loaded
+                </span>
+              )}
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  background: 'var(--color-text-tertiary, #666)',
+                  display: 'inline-block',
                 }}
               />
-              <Line type="monotone" dataKey="power" stroke="var(--color-accent)" strokeWidth={2} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      )}
+              <span className="hud-mono" style={{ fontSize: 13, color: 'var(--color-text-tertiary)' }}>
+                Offline
+              </span>
+            </div>
+          )}
+        </GlanceCard>
+      </div>
     </div>
   );
 }
 
-function formatNumber(n: number): string {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
-  return String(n);
+function formatEventTime(dateStr: string): string {
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
+    return d.toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    });
+  } catch {
+    return dateStr;
+  }
 }

@@ -13,9 +13,10 @@ public method returns ``None`` or ``False`` instead of raising.
 from __future__ import annotations
 
 import logging
-import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+
+from openjarvis.core.db import open_db
 
 if TYPE_CHECKING:
     import torch  # type: ignore[import]
@@ -60,8 +61,7 @@ class EmbeddingStore:
         self._tensor_dir.mkdir(parents=True, exist_ok=True)
 
         db_path = self._store_dir / "index.db"
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL;")
+        self._conn = open_db(db_path)
         self._conn.executescript(_CREATE_INDEX_TABLE)
         self._conn.commit()
 

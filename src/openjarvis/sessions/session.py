@@ -6,7 +6,6 @@ Supports consolidation and decay.
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from openjarvis.core.config import DEFAULT_CONFIG_DIR
+from openjarvis.core.db import open_db
 
 
 @dataclass(slots=True)
@@ -74,7 +74,7 @@ class SessionStore:
     ) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        self._conn = open_db(self._db_path)
         self._max_age_hours = max_age_hours
         self._consolidation_threshold = consolidation_threshold
         self._create_tables()

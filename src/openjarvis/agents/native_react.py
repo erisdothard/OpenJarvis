@@ -32,6 +32,10 @@ Action Input: <json arguments>
 Thought: <your reasoning>
 Final Answer: <your answer>
 
+# Rules
+
+- For factual claims about current events or recent information, use a search or retrieval tool before answering. Do not rely on training data for time-sensitive facts.
+
 # Using Skills
 
 Tools whose names begin with `skill_` are SKILLS. When you call a skill tool,

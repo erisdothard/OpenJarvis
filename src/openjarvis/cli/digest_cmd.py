@@ -81,7 +81,7 @@ def _save_digest_schedule(enabled: bool, cron: str) -> None:
     config_path.write_text("\n".join(new_lines))
 
 
-def _create_scheduler_task(cron: str) -> Optional[str]:
+def _create_scheduler_task(cron: str, digest_type: str = "morning") -> Optional[str]:
     """Create a digest task in the TaskScheduler. Returns task ID or None."""
     try:
         from openjarvis.scheduler.scheduler import TaskScheduler
@@ -91,21 +91,37 @@ def _create_scheduler_task(cron: str) -> Optional[str]:
         store = SchedulerStore(db_path)
         scheduler = TaskScheduler(store)
 
-        # Cancel any existing digest tasks first
+        # Cancel any existing digest tasks of the same type
         for task in scheduler.list_tasks(status="active"):
             if task.agent == "morning_digest":
-                scheduler.cancel_task(task.id)
+                meta = task.metadata or {}
+                if meta.get("digest_type", "morning") == digest_type:
+                    scheduler.cancel_task(task.id)
 
+        label = {"morning": "morning", "midday": "midday", "evening": "evening"}.get(
+            digest_type, "morning"
+        )
         task = scheduler.create_task(
-            prompt="Generate my morning digest",
+            prompt=f"Generate my {label} digest",
             schedule_type="cron",
             schedule_value=cron,
             agent="morning_digest",
+            metadata={"digest_type": digest_type},
         )
         store.close()
         return task.id
     except Exception:
         return None
+
+
+def _create_all_scheduler_tasks(
+    schedules: dict[str, str],
+) -> dict[str, Optional[str]]:
+    """Create scheduler tasks for all configured digest schedules."""
+    results: dict[str, Optional[str]] = {}
+    for digest_type, cron in schedules.items():
+        results[digest_type] = _create_scheduler_task(cron, digest_type)
+    return results
 
 
 def _cancel_scheduler_tasks() -> int:
@@ -264,8 +280,13 @@ def _handle_schedule(console: Console, schedule: str) -> None:
         # Show current schedule status
         status = "enabled" if digest_cfg.enabled else "disabled"
         console.print(f"[bold]Digest schedule:[/bold] {status}")
-        console.print(f"  Cron: {digest_cfg.schedule}")
         console.print(f"  Timezone: {digest_cfg.timezone}")
+        schedules = getattr(digest_cfg, "schedules", None)
+        if isinstance(schedules, dict) and schedules:
+            for dtype, cron in schedules.items():
+                console.print(f"  {dtype:>8}: {cron}")
+        else:
+            console.print(f"  Cron: {digest_cfg.schedule}")
         return
 
     if schedule.lower() == "off":
@@ -277,7 +298,7 @@ def _handle_schedule(console: Console, schedule: str) -> None:
             console.print(f"  Cancelled {cancelled} scheduler task(s).")
         return
 
-    # Set a new cron schedule
+    # Set a new cron schedule (legacy single-schedule path)
     _save_digest_schedule(enabled=True, cron=schedule)
     task_id = _create_scheduler_task(schedule)
     console.print(f"[green]Digest schedule set:[/green] {schedule}")

@@ -868,7 +868,11 @@ async def transcribe_speech(request: Request):
     filename = getattr(audio_file, "filename", "audio.wav")
     ext = filename.rsplit(".", 1)[-1] if "." in filename else "wav"
 
-    result = backend.transcribe(audio_bytes, format=ext, language=language or None)
+    try:
+        result = backend.transcribe(audio_bytes, format=ext, language=language or None)
+    except Exception as e:
+        logger.error("Transcription failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
     return {
         "text": result.text,
         "language": result.language,
@@ -887,6 +891,103 @@ async def speech_health(request: Request):
         "available": backend.health(),
         "backend": backend.backend_id,
     }
+
+
+@speech_router.post("/synthesize")
+async def synthesize_speech(request: Request):
+    """Synthesize text to speech using the configured TTS backend."""
+    import os
+
+    from openjarvis.core.registry import TTSRegistry
+
+    body = await request.json()
+    text = body.get("text", "")
+    if not text:
+        raise HTTPException(status_code=400, detail="Missing 'text' field")
+
+    voice_id = body.get("voice_id", "")
+    speed = body.get("speed", 1.0)
+    # Read TTS backend from config; fall back to openai_tts
+    try:
+        import tomllib
+        from pathlib import Path
+        _cfg_path = Path.home() / ".openjarvis" / "config.toml"
+        _default_tts = "openai_tts"
+        if _cfg_path.exists():
+            with open(_cfg_path, "rb") as f:
+                _raw = tomllib.load(f)
+            _default_tts = _raw.get("speech", {}).get("tts_backend", "openai_tts")
+    except Exception:
+        _default_tts = "openai_tts"
+    backend_name = body.get("backend") or _default_tts
+
+    # Cache TTS backends on app.state to avoid reloading models per request.
+    # Pre-warming happens in app.py lifespan; this is the fallback path.
+    tts_cache = getattr(request.app.state, "_tts_cache", None)
+    if tts_cache is None:
+        tts_cache = {}
+        request.app.state._tts_cache = tts_cache
+
+    if backend_name not in tts_cache:
+        try:
+            import openjarvis.speech.openai_tts  # noqa: F401
+        except ImportError:
+            pass
+
+        try:
+            backend_cls = TTSRegistry.get(backend_name)
+        except KeyError:
+            raise HTTPException(status_code=400, detail=f"TTS backend '{backend_name}' not found")
+
+        try:
+            tts_cache[backend_name] = backend_cls()
+        except Exception as e:
+            logger.error("TTS backend '%s' init failed: %s", backend_name, e, exc_info=True)
+            raise HTTPException(status_code=500, detail=f"TTS backend init failed: {e}")
+
+    # Ordered fallback chain: try primary, then fall back to alternatives
+    _TTS_FALLBACK_ORDER = ["openai_tts"]
+    backends_to_try = [backend_name] + [b for b in _TTS_FALLBACK_ORDER if b != backend_name]
+
+    import asyncio
+
+    last_error = None
+    result = None
+    for try_name in backends_to_try:
+        # Ensure backend is loaded
+        if try_name not in tts_cache:
+            try:
+                b_cls = TTSRegistry.get(try_name)
+                tts_cache[try_name] = b_cls()
+            except (KeyError, Exception):
+                continue
+        try:
+            _kwargs = {"speed": speed}
+            if voice_id:
+                _kwargs["voice_id"] = voice_id
+            # Run synchronous TTS in a thread so it doesn't block the event loop
+            result = await asyncio.to_thread(
+                tts_cache[try_name].synthesize, text, **_kwargs,
+            )
+            if try_name != backend_name:
+                logger.warning("TTS: %s failed, fell back to %s", backend_name, try_name)
+            break
+        except Exception as e:
+            last_error = e
+            logger.warning("TTS backend '%s' failed: %s — trying next", try_name, e)
+            continue
+
+    if result is None:
+        logger.error("All TTS backends failed. Last error: %s", last_error)
+        raise HTTPException(status_code=500, detail=f"All TTS backends failed: {last_error}")
+
+    from fastapi.responses import Response
+
+    return Response(
+        content=result.audio,
+        media_type=f"audio/{result.format}",
+        headers={"Content-Disposition": f"inline; filename=speech.{result.format}"},
+    )
 
 
 # ---- Feedback routes ----
@@ -1008,6 +1109,14 @@ def include_all_routes(app) -> None:
     app.include_router(feedback_router)
     app.include_router(optimize_router)
 
+    # Quick-capture routes (phone/shortcut inbox)
+    try:
+        from openjarvis.server.capture_routes import router as capture_router
+
+        app.include_router(capture_router)
+    except ImportError:
+        logger.debug("Capture routes not available", exc_info=True)
+
     # Agent Manager routes (if available)
     try:
         if hasattr(app.state, "agent_manager") and app.state.agent_manager:
@@ -1056,4 +1165,5 @@ __all__ = [
     "speech_router",
     "feedback_router",
     "optimize_router",
+    "capture_router",
 ]

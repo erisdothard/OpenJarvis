@@ -57,7 +57,7 @@ class TextToSpeechTool(BaseTool):
         import openjarvis.speech  # noqa: F401
 
         text = params.get("text", "")
-        voice_id = params.get("voice_id", "")
+        voice_id = params.get("voice_id", "") or "fable"
         backend_key = params.get("backend", "cartesia")
         _ALIASES = {"openai": "openai_tts"}
         backend_key = _ALIASES.get(backend_key, backend_key)

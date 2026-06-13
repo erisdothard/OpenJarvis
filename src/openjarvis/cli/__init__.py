@@ -164,6 +164,13 @@ except ImportError:
 def main() -> None:
     """Entry point registered as ``jarvis`` console script."""
     import sys
+    from pathlib import Path
+
+    from dotenv import load_dotenv
+
+    # Load .env from project root (or nearest parent) before anything else
+    _env = Path(__file__).resolve().parents[3] / ".env"
+    load_dotenv(_env)
 
     if sys.platform == "win32":
         for _stream in (sys.stdout, sys.stderr):

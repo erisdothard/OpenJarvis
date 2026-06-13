@@ -19,16 +19,19 @@ export default defineConfig({
         name: 'OpenJarvis',
         short_name: 'Jarvis',
         description: 'On-device AI assistant',
-        theme_color: '#161618',
-        background_color: '#161618',
+        theme_color: '#030305',
+        background_color: '#030305',
         display: 'standalone',
+        orientation: 'portrait',
         icons: [
           { src: 'pwa-192x192.png', sizes: '192x192', type: 'image/png' },
           { src: 'pwa-512x512.png', sizes: '512x512', type: 'image/png' },
+          { src: 'pwa-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+        globPatterns: ['**/*.{js,css,html,ico,svg}'],
+        maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         navigateFallbackDenylist: [/^\/v1\//, /^\/health/, /^\/dashboard/, /^\/api\//],
       },
     }),
@@ -51,7 +54,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/v1': process.env.VITE_API_URL || 'http://localhost:8000',
+      '/v1': {
+        target: process.env.VITE_API_URL || 'http://localhost:8000',
+        ws: true,
+      },
       '/health': process.env.VITE_API_URL || 'http://localhost:8000',
       '/api': process.env.VITE_API_URL || 'http://localhost:8000',
     },

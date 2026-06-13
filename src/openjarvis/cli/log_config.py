@@ -20,6 +20,38 @@ class SanitizingFormatter(logging.Formatter):
         return _stripper.strip(msg)
 
 
+def setup_server_logging() -> logging.Logger:
+    """Configure rotating log handlers for the server process.
+
+    Redirects the root logger to a rotating file at
+    ~/.openjarvis/logs/serve.log (10MB max, 5 backups).
+    """
+    from openjarvis.security.file_utils import secure_mkdir
+
+    log_dir = Path.home() / ".openjarvis" / "logs"
+    secure_mkdir(log_dir)
+    log_file = log_dir / "serve.log"
+
+    root = logging.getLogger()
+    handler = RotatingFileHandler(
+        str(log_file),
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+    )
+    handler.setLevel(logging.DEBUG)
+    fmt = SanitizingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    handler.setFormatter(fmt)
+    root.addHandler(handler)
+
+    # Also configure the openjarvis logger
+    oj_logger = logging.getLogger("openjarvis")
+    oj_logger.setLevel(logging.INFO)
+    if not oj_logger.handlers:
+        oj_logger.addHandler(handler)
+
+    return oj_logger
+
+
 def setup_logging(
     verbose: bool = False,
     quiet: bool = False,

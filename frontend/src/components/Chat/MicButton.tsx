@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import type { SpeechState } from '../../hooks/useSpeech';
+import type { VoiceStreamState } from '../../hooks/useVoiceStream';
 
 interface MicButtonProps {
-  state: SpeechState;
+  /** Current voice stream state — drives the visual feedback. */
+  state: VoiceStreamState;
   onClick: () => void;
   disabled?: boolean;
   reason?: 'not-enabled' | 'no-backend' | 'streaming';
@@ -11,20 +12,23 @@ interface MicButtonProps {
 export function MicButton({ state, onClick, disabled, reason }: MicButtonProps) {
   const [showTooltip, setShowTooltip] = useState(false);
 
+  const isActive = state !== 'disconnected';
+  const isProcessing = state === 'connecting' || state === 'transcribing' || state === 'thinking';
+
   const tooltipText =
     reason === 'not-enabled'
       ? 'Enable in Settings'
       : reason === 'no-backend'
-        ? 'Speech backend not configured'
+        ? 'Voice backend not configured'
         : reason === 'streaming'
           ? 'Wait for response'
-          : state === 'recording'
-            ? 'Stop recording'
-            : state === 'transcribing'
-              ? 'Transcribing...'
+          : isProcessing
+            ? 'Processing...'
+            : isActive
+              ? 'Disconnect voice'
               : 'Voice input';
 
-  const isInactive = disabled || state === 'transcribing';
+  const isInactive = disabled || isProcessing;
 
   return (
     <div
@@ -35,22 +39,27 @@ export function MicButton({ state, onClick, disabled, reason }: MicButtonProps) 
       <button
         onClick={onClick}
         disabled={isInactive}
-        className="p-2 rounded-xl transition-all shrink-0"
+        className="p-2.5 rounded-xl transition-all shrink-0"
         style={{
-          background: state === 'recording'
+          background: isActive && !isProcessing
             ? 'var(--color-error)'
             : 'transparent',
-          color: state === 'recording'
+          color: isActive && !isProcessing
             ? 'white'
             : isInactive
               ? 'var(--color-text-tertiary)'
               : 'var(--color-text-secondary)',
           cursor: isInactive ? 'default' : 'pointer',
           opacity: isInactive ? 0.35 : 1,
-          animation: state === 'recording' ? 'pulse 1.5s ease-in-out infinite' : 'none',
+          animation: isActive && !isProcessing ? 'pulse 1.5s ease-in-out infinite' : 'none',
+          minWidth: 44,
+          minHeight: 44,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
         }}
       >
-        {state === 'transcribing' ? (
+        {isProcessing ? (
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
             <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray="28" strokeDashoffset="10">
               <animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="1s" repeatCount="indefinite" />
