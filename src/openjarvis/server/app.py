@@ -18,7 +18,6 @@ from openjarvis.server.connectors_router import create_connectors_router
 from openjarvis.server.dashboard import dashboard_router
 from openjarvis.server.glance_routes import glance_router
 from openjarvis.server.digest_routes import create_digest_router
-from openjarvis.server.livekit_routes import router as livekit_router
 from openjarvis.server.research_router import router as research_router
 from openjarvis.server.routes import router
 from openjarvis.server.upload_router import router as upload_router
@@ -158,6 +157,7 @@ def create_app(
     speech_backend=None,
     agent_manager=None,
     agent_scheduler=None,
+    telem_store=None,
     api_key: str = "",
     webhook_config: dict | None = None,
     cors_origins: list[str] | None = None,
@@ -228,7 +228,13 @@ def create_app(
     app.state.speech_backend = speech_backend
     app.state.agent_manager = agent_manager
     app.state.agent_scheduler = agent_scheduler
+    app.state.telem_store = telem_store
     app.state.session_start = time.time()
+
+    # Shared system-prompt cache — avoids re-reading SOUL/MEMORY/USER.md on
+    # every HTTP request.  Staleness is detected via file mtime (stat only).
+    from openjarvis.prompt.builder import SystemPromptCache
+    app.state.prompt_cache = SystemPromptCache()
 
     # Pre-warm TTS backend so the first voice response has no cold-start lag
     try:
@@ -312,7 +318,6 @@ def create_app(
     app.include_router(upload_router)
     app.include_router(research_router)
     app.include_router(analytics_router)
-    app.include_router(livekit_router)
     app.include_router(glance_router)
     app.include_router(voice_ws_router)
 
@@ -456,6 +461,88 @@ def create_app(
         task = getattr(app.state, "_checkpoint_task", None)
         if task is not None:
             task.cancel()
+
+    # -- Daily database maintenance task -----------------------------------
+    # Runs VACUUM, FTS optimize, and row purges once per day.
+    # First run is delayed 1 hour after startup to avoid contending with
+    # the startup I/O burst.  Subsequent runs fire every 24 hours.
+    @app.on_event("startup")
+    async def _start_daily_maintenance() -> None:
+        from openjarvis.core.config import DEFAULT_CONFIG_DIR
+        from openjarvis.core.maintenance import run_daily_maintenance
+
+        async def _loop() -> None:
+            # Initial delay — don't compete with startup I/O.
+            await asyncio.sleep(3600)
+            while True:
+                try:
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None, run_daily_maintenance, DEFAULT_CONFIG_DIR
+                    )
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:
+                    logger.warning("Daily maintenance error: %s", exc)
+                try:
+                    await asyncio.sleep(86400)  # 24 hours
+                except asyncio.CancelledError:
+                    break
+
+        app.state._maintenance_task = asyncio.create_task(_loop())
+
+    @app.on_event("shutdown")
+    async def _stop_daily_maintenance() -> None:
+        task = getattr(app.state, "_maintenance_task", None)
+        if task is not None:
+            task.cancel()
+
+    @app.on_event("shutdown")
+    async def _shutdown_databases() -> None:
+        """Close all database-holding objects and run a final WAL TRUNCATE."""
+        import sqlite3 as _sqlite3
+
+        from openjarvis.core.config import DEFAULT_CONFIG_DIR
+
+        # --- Close each app.state DB-holder ---
+        def _try_close(obj) -> None:
+            if obj is None:
+                return
+            try:
+                obj.close()
+            except Exception:
+                pass
+
+        _try_close(getattr(app.state, "trace_store", None))
+        _try_close(getattr(app.state, "memory_backend", None))
+        _try_close(getattr(app.state, "telem_store", None))
+
+        agent_manager = getattr(app.state, "agent_manager", None)
+        if agent_manager is not None:
+            try:
+                agent_manager.close()
+            except Exception:
+                pass
+
+        # --- Final TRUNCATE checkpoint on all .db files ---
+        # TRUNCATE moves WAL pages into the main DB file and resets the WAL
+        # so the next startup has zero WAL to recover, giving faster boot and
+        # preventing stale WAL accumulation across restarts.
+        loop = asyncio.get_event_loop()
+
+        def _truncate_all() -> None:
+            for db_file in DEFAULT_CONFIG_DIR.rglob("*.db"):
+                try:
+                    conn = _sqlite3.connect(str(db_file))
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    conn.close()
+                except _sqlite3.Error:
+                    pass
+
+        try:
+            await loop.run_in_executor(None, _truncate_all)
+        except Exception:
+            pass
 
     # Serve static frontend assets if the static/ directory exists
     static_dir = pathlib.Path(__file__).parent / "static"

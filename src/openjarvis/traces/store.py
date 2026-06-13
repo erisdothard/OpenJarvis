@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -237,6 +238,32 @@ class TraceStore:
         )
         self._conn.commit()
         return cursor.rowcount > 0
+
+    def purge(self, max_age_days: int = 30) -> int:
+        """Delete traces (and their steps) older than *max_age_days*.
+
+        ``started_at`` is a Unix epoch float.  Steps are deleted first to
+        satisfy the ``trace_steps → traces`` foreign-key constraint.
+
+        Returns the number of *traces* deleted.
+        """
+        cutoff = time.time() - max_age_days * 86400
+        # Collect trace_ids about to be removed so we can target their steps.
+        rows = self._conn.execute(
+            "SELECT trace_id FROM traces WHERE started_at < ?", (cutoff,)
+        ).fetchall()
+        if not rows:
+            return 0
+        ids = [r[0] for r in rows]
+        placeholders = ",".join("?" * len(ids))
+        self._conn.execute(
+            f"DELETE FROM trace_steps WHERE trace_id IN ({placeholders})", ids
+        )
+        cur = self._conn.execute(
+            f"DELETE FROM traces WHERE trace_id IN ({placeholders})", ids
+        )
+        self._conn.commit()
+        return cur.rowcount
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""

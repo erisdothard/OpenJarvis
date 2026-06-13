@@ -51,7 +51,7 @@ class MorningDigestAgent(ToolUsingAgent):
         )
         self._section_sources = kwargs.pop("section_sources", {})
         self._timezone = kwargs.pop("timezone", "America/Los_Angeles")
-        self._voice_id = kwargs.pop("voice_id", "")
+        self._voice_id = kwargs.pop("voice_id", "") or "fable"
         self._voice_speed = kwargs.pop("voice_speed", 1.0)
         self._tts_backend = kwargs.pop("tts_backend", "openai_tts")
         self._digest_store_path = kwargs.pop("digest_store_path", "")
@@ -189,6 +189,7 @@ class MorningDigestAgent(ToolUsingAgent):
         default_source_map = {
             "messages": [
                 "gmail",
+                "gmail_syntra",
                 "slack",
                 "google_tasks",
                 "imessage",
@@ -265,7 +266,7 @@ class MorningDigestAgent(ToolUsingAgent):
             f"Synthesize my morning briefing. Remember:\n"
             f"- Priority-first, connect related items\n"
             f"{base_rules}\n"
-            f"- STRICT LIMIT: 200-250 words maximum"
+            f"- STRICT LIMIT: 200 words maximum"
         )
 
     @staticmethod

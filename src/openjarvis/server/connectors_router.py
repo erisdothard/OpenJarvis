@@ -1,7 +1,5 @@
 """FastAPI router for /v1/connectors — connector management endpoints."""
 
-from __future__ import annotations
-
 import logging
 from typing import Any, Dict, Optional
 
@@ -503,8 +501,14 @@ def create_connectors_router():
             "client_secret": client_secret,
         }
 
-        for filename in provider.credential_files:
-            save_tokens(str(_CONNECTORS_DIR / filename), payload)
+        # Save tokens to the connector-specific file only (not all
+        # provider files) so multi-account setups don't overwrite each other.
+        target_file = f"{connector_id}.json"
+        if target_file in provider.credential_files:
+            save_tokens(str(_CONNECTORS_DIR / target_file), payload)
+        else:
+            # Fallback: save to first credential file for the provider
+            save_tokens(str(_CONNECTORS_DIR / provider.credential_files[0]), payload)
 
         # Clear cached instance so it picks up new credentials
         _instances.pop(connector_id, None)

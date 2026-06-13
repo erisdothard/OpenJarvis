@@ -18,6 +18,7 @@ epoch of 2001-01-01 00:00:00 UTC.  Conversion formula::
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +38,10 @@ _DEFAULT_DB_PATH = Path.home() / "Library" / "Messages" / "chat.db"
 
 # Apple epoch: 2001-01-01 00:00:00 UTC
 _APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
+
+# AddressBook database paths
+_ADDRESSBOOK_DIR = Path.home() / "Library" / "Application Support" / "AddressBook"
+_ADDRESSBOOK_DB = "AddressBook-v22.abcddb"
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +64,127 @@ def _apple_ts_to_datetime(apple_ns: int) -> datetime:
     """
     seconds = apple_ns / 1_000_000_000
     return _APPLE_EPOCH + timedelta(seconds=seconds)
+
+
+# ---------------------------------------------------------------------------
+# Contact name resolution from Apple Contacts
+# ---------------------------------------------------------------------------
+
+_DIGITS_ONLY = re.compile(r"[^\d+]")
+
+
+def _normalize_phone(raw: str) -> str:
+    """Strip a phone number to digits + optional leading '+' for matching."""
+    return _DIGITS_ONLY.sub("", raw)
+
+
+def _build_contact_lookup() -> Dict[str, str]:
+    """Build a mapping of phone/email → contact display name.
+
+    Reads the macOS Apple Contacts database(s) and returns a dict where
+    keys are normalized phone numbers and lowercase email addresses, and
+    values are the contact's display name.
+    """
+    lookup: Dict[str, str] = {}
+
+    db_paths: List[Path] = []
+    main_db = _ADDRESSBOOK_DIR / _ADDRESSBOOK_DB
+    if main_db.exists():
+        db_paths.append(main_db)
+    sources_dir = _ADDRESSBOOK_DIR / "Sources"
+    try:
+        if sources_dir.is_dir():
+            for child in sorted(sources_dir.iterdir()):
+                candidate = child / _ADDRESSBOOK_DB
+                if candidate.exists():
+                    db_paths.append(candidate)
+    except PermissionError:
+        pass
+
+    if not db_paths:
+        logger.debug("No AddressBook databases found for contact name resolution")
+        return lookup
+
+    for db_path in db_paths:
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.OperationalError:
+            continue
+
+        try:
+            rows = conn.execute(
+                "SELECT Z_PK, ZFIRSTNAME, ZMIDDLENAME, ZLASTNAME, ZORGANIZATION "
+                "FROM ZABCDRECORD "
+                "WHERE ZFIRSTNAME IS NOT NULL OR ZLASTNAME IS NOT NULL "
+                "   OR ZORGANIZATION IS NOT NULL"
+            ).fetchall()
+
+            for pk, first, middle, last, org in rows:
+                first = first or ""
+                middle = middle or ""
+                last = last or ""
+                org = org or ""
+                parts = [p for p in (first, middle, last) if p]
+                name = " ".join(parts) or org
+                if not name:
+                    continue
+
+                # Map phone numbers → name
+                phones = conn.execute(
+                    "SELECT ZFULLNUMBER FROM ZABCDPHONENUMBER WHERE ZOWNER = ?",
+                    (pk,),
+                ).fetchall()
+                for (number,) in phones:
+                    if number:
+                        lookup[_normalize_phone(number)] = name
+
+                # Map email addresses → name
+                emails = conn.execute(
+                    "SELECT ZADDRESS FROM ZABCDEMAILADDRESS WHERE ZOWNER = ?",
+                    (pk,),
+                ).fetchall()
+                for (addr,) in emails:
+                    if addr:
+                        lookup[addr.lower()] = name
+        except sqlite3.OperationalError:
+            logger.debug("Could not read AddressBook at %s", db_path)
+        finally:
+            conn.close()
+
+    logger.info("Built contact lookup with %d entries", len(lookup))
+    return lookup
+
+
+def _resolve_handle(identifier: str, contact_lookup: Dict[str, str]) -> str:
+    """Resolve a raw iMessage handle (phone/email) to a contact name.
+
+    Falls back to the raw identifier if no match is found.
+    """
+    # Try email match (case-insensitive)
+    if "@" in identifier:
+        name = contact_lookup.get(identifier.lower())
+        if name:
+            return name
+        return identifier
+
+    # Try phone match (normalized digits)
+    normalized = _normalize_phone(identifier)
+    name = contact_lookup.get(normalized)
+    if name:
+        return name
+
+    # Try without country code (strip leading +1 for US numbers)
+    if normalized.startswith("+1") and len(normalized) > 5:
+        name = contact_lookup.get(normalized[2:])
+        if name:
+            return name
+    elif not normalized.startswith("+") and len(normalized) == 10:
+        # Try adding +1 prefix
+        name = contact_lookup.get(f"+1{normalized}")
+        if name:
+            return name
+
+    return identifier
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +292,11 @@ class IMessageConnector(BaseConnector):
                 handle_map[row[0]] = row[1]
 
             # ------------------------------------------------------------------
+            # 1b. Build contact name lookup from Apple Contacts
+            # ------------------------------------------------------------------
+            contact_lookup = _build_contact_lookup()
+
+            # ------------------------------------------------------------------
             # 2. Build message_id → chat_id map
             # ------------------------------------------------------------------
             msg_to_chat: Dict[int, int] = {}
@@ -217,19 +348,24 @@ class IMessageConnector(BaseConnector):
                     if timestamp < since_utc:
                         continue
 
-                # Determine author
+                # Determine author — resolve phone/email to contact name
                 if is_from_me:
                     author = "me"
                 else:
-                    author = handle_map.get(handle_id, "unknown")
+                    raw_handle = handle_map.get(handle_id, "unknown")
+                    author = _resolve_handle(raw_handle, contact_lookup)
 
                 # Determine chat name / title
                 chat_id = msg_to_chat.get(rowid)
                 if chat_id is not None and chat_id in chat_map:
                     _chat_identifier, chat_name = chat_map[chat_id]
+                    # Resolve chat name if it's still a phone number
+                    if chat_name and (chat_name.startswith("+") or chat_name.replace("-", "").replace(" ", "").isdigit()):
+                        chat_name = _resolve_handle(chat_name, contact_lookup)
                 else:
-                    # Fall back to the handle identifier
-                    chat_name = handle_map.get(handle_id, "")
+                    # Fall back to resolved handle name
+                    raw_handle = handle_map.get(handle_id, "")
+                    chat_name = _resolve_handle(raw_handle, contact_lookup) if raw_handle else ""
 
                 doc = Document(
                     doc_id=f"imessage:{rowid}",

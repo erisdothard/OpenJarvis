@@ -112,6 +112,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_kc_natural_key
 """
 
 # ---------------------------------------------------------------------------
+# FTS query helpers
+# ---------------------------------------------------------------------------
+
+_STOP_WORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been",
+    "being", "have", "has", "had", "do", "does", "did", "will",
+    "would", "could", "should", "may", "might", "can", "shall",
+    "i", "me", "my", "we", "our", "you", "your", "he", "she",
+    "it", "they", "them", "this", "that", "what", "which", "who",
+})
+
+
+def _normalize_fts_query(query: str) -> str:
+    """Strip stop words from a plain-text query before FTS5 MATCH.
+
+    Only operates on plain tokens — does not modify FTS5 operators
+    (AND, OR, NOT, NEAR, phrase-quoted strings, or column filters).
+    Returns the original query unchanged if all tokens are stop words
+    or the query is empty.
+    """
+    tokens = query.lower().split()
+    filtered = [t for t in tokens if t not in _STOP_WORDS and len(t) > 1]
+    return " ".join(filtered) if filtered else query
+
+
+# ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 
@@ -169,7 +195,12 @@ class KnowledgeStore(MemoryBackend):
 
             secure_create(Path(self._db_path))
 
-        self._conn = open_db(self._db_path, row_factory=True, foreign_keys=True)
+        self._conn = open_db(
+            self._db_path,
+            row_factory=True,
+            foreign_keys=True,
+            busy_timeout_ms=10000,  # knowledge.db can be large; give it 10 s
+        )
         self._setup()
 
     def __enter__(self) -> "KnowledgeStore":
@@ -361,6 +392,9 @@ class KnowledgeStore(MemoryBackend):
         if not query.strip():
             return []
 
+        # Normalize query: strip stop words to improve BM25 signal
+        query = _normalize_fts_query(query)
+
         since_str = _to_iso(since) if since is not None else None
         until_str = _to_iso(until) if until is not None else None
 
@@ -389,14 +423,16 @@ class KnowledgeStore(MemoryBackend):
 
         where_clause = "AND " + " AND ".join(filters)
 
-        # FTS5 bm25() returns negative scores; abs() gives a positive rank
+        # FTS5 bm25() returns negative values; more-negative == better match.
+        # Negating gives positive scores where higher == better, so
+        # ORDER BY score DESC correctly ranks best matches first.
         sql = f"""
             SELECT
                 kc.id,
                 kc.content,
                 kc.source,
                 kc.metadata,
-                abs(bm25(knowledge_fts)) AS score
+                -bm25(knowledge_fts) AS score
             FROM knowledge_fts
             JOIN knowledge_chunks kc ON knowledge_fts.rowid = kc.rowid
             WHERE knowledge_fts MATCH ?
@@ -482,6 +518,80 @@ class KnowledgeStore(MemoryBackend):
             "ORDER BY source"
         ).fetchall()
         return [r[0] for r in rows]
+
+    def purge_tombstoned(self, older_than_days: int = 7) -> int:
+        """Hard-delete rows where ``deleted_at`` is set and older than *older_than_days*.
+
+        ``deleted_at`` is a Unix epoch float (``REAL``).  Only rows where the
+        column is non-NULL and the value is older than the cutoff are removed.
+
+        Returns the number of rows hard-deleted.
+        """
+        cutoff = time.time() - older_than_days * 86400
+        cur = self._conn.execute(
+            "DELETE FROM knowledge_chunks WHERE deleted_at IS NOT NULL AND deleted_at < ?",
+            (cutoff,),
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    def deduplicate_by_hash(self, dry_run: bool = True) -> int:
+        """Find chunks with duplicate ``content_hash`` and remove the newer copies.
+
+        For each ``content_hash`` value with more than one row the oldest row
+        (lowest ``created_at``) is kept and all newer rows are deleted.
+
+        Empty hashes (``''``) are ignored — they represent un-hashed content
+        and cannot be deduplicated by hash alone.
+
+        Parameters
+        ----------
+        dry_run:
+            If ``True`` (default) only count and return duplicates without
+            deleting.  If ``False`` perform the deletions.
+
+        Returns the number of duplicate rows (deleted or would-be-deleted).
+        """
+        dupes = self._conn.execute(
+            """
+            SELECT content_hash, COUNT(*) AS cnt
+            FROM knowledge_chunks
+            WHERE content_hash != ''
+            GROUP BY content_hash
+            HAVING cnt > 1
+            """
+        ).fetchall()
+
+        if not dupes:
+            return 0
+
+        total_extra = sum(row[1] - 1 for row in dupes)
+
+        if dry_run:
+            return total_extra
+
+        deleted = 0
+        for row in dupes:
+            content_hash = row[0]
+            ids = [
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT id FROM knowledge_chunks "
+                    "WHERE content_hash = ? ORDER BY created_at ASC",
+                    (content_hash,),
+                ).fetchall()
+            ]
+            to_delete = ids[1:]
+            if to_delete:
+                placeholders = ",".join("?" * len(to_delete))
+                cur = self._conn.execute(
+                    f"DELETE FROM knowledge_chunks WHERE id IN ({placeholders})",
+                    to_delete,
+                )
+                deleted += cur.rowcount
+
+        self._conn.commit()
+        return deleted
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""

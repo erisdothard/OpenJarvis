@@ -6,7 +6,10 @@ import { streamChat, streamResearch } from '../../lib/sse';
 import { apiFetch, fetchSavings, getBase, synthesizeSpeech } from '../../lib/api';
 import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { MicButton } from './MicButton';
-import { useSpeech } from '../../hooks/useSpeech';
+import { useVoiceStream } from '../../hooks/useVoiceStream';
+import { useAudioManager } from '../../hooks/useAudioManager';
+import type { AudioManagerReturn } from '../../hooks/useAudioManager';
+import { extractSentence, cleanForTTS } from '../../lib/sentenceBuffer';
 import type {
   ChatMessage,
   MessageTelemetry,
@@ -99,6 +102,41 @@ export function InputArea() {
 
   const pendingVoiceRef = useRef(false);
   const voiceInitiatedRef = useRef(false);
+  const sentenceBufferRef = useRef('');
+
+  // Ref to break circular dependency between audioManager and voiceStream
+  const audioManagerRef = useRef<AudioManagerReturn>(null!);
+
+  // ── Audio manager (single source of truth for all playback) ──
+  const audioManager = useAudioManager({
+    onPlaybackFinished: () => {
+      voiceInitiatedRef.current = false;
+    },
+  });
+  audioManagerRef.current = audioManager;
+
+  // ── WebSocket voice stream ──
+  const voiceStream = useVoiceStream({
+    onTranscript: useCallback((text: string, isFinal: boolean) => {
+      if (!isFinal) return;
+      const clean = text?.trim();
+      if (clean && clean.length > 1) {
+        setInput(clean);
+        pendingVoiceRef.current = true;
+      }
+    }, []),
+    onAudioData: useCallback((pcm: ArrayBuffer) => {
+      audioManagerRef.current.enqueuePCM(pcm);
+    }, []),
+    onStopPlayback: useCallback(() => {
+      audioManagerRef.current.interruptAll();
+    }, []),
+    onError: useCallback((detail: string) => {
+      toast.error(detail);
+    }, []),
+  });
+
+  const wsVoiceActive = voiceStream.state !== 'disconnected';
 
   // File attachments
   const [attachedFiles, setAttachedFiles] = useState<{ name: string; chunks: number }[]>([]);
@@ -142,91 +180,7 @@ export function InputArea() {
     setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
-  // Audio queue for sentence-level TTS playback
-  const audioQueueRef = useRef<HTMLAudioElement[]>([]);
-  const playingRef = useRef(false);
-  const sentenceBufferRef = useRef('');
-
-  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
-  const startRecordingRef = useRef<(() => Promise<void>) | undefined>(undefined);
-  const interruptAudioRef = useRef<() => void>(() => {});
-  const stopBargeInRef = useRef<() => void>(() => {});
-  const startBargeInRef = useRef<(cb: () => void) => void>(() => {});
-
-  const playNextAudio = useCallback(() => {
-    if (audioQueueRef.current.length === 0) {
-      playingRef.current = false;
-      currentAudioRef.current = null;
-      stopBargeInRef.current();
-      voiceInitiatedRef.current = false;
-      return;
-    }
-    playingRef.current = true;
-    const audio = audioQueueRef.current.shift()!;
-    currentAudioRef.current = audio;
-    audio.onended = () => {
-      URL.revokeObjectURL(audio.src);
-      currentAudioRef.current = null;
-      playNextAudio();
-    };
-    audio.play().catch(() => playNextAudio());
-    // Start barge-in monitor so user can interrupt by speaking
-    startBargeInRef.current(() => {
-      interruptAudioRef.current();
-    });
-  }, []);
-
-  // Interrupt Jarvis: stop all queued audio immediately
-  const interruptAudio = useCallback(() => {
-    stopBargeInRef.current();
-    if (currentAudioRef.current) {
-      currentAudioRef.current.pause();
-      URL.revokeObjectURL(currentAudioRef.current.src);
-      currentAudioRef.current = null;
-    }
-    for (const a of audioQueueRef.current) {
-      URL.revokeObjectURL(a.src);
-    }
-    audioQueueRef.current = [];
-    playingRef.current = false;
-  }, []);
-  interruptAudioRef.current = interruptAudio;
-
-  const queueSentenceTTS = useCallback((sentence: string) => {
-    const clean = sentence
-      .replace(/```[\s\S]*?```/g, 'code block omitted')
-      .replace(/[#*_~`>\[\]]/g, '')
-      .replace(/\n+/g, ' ')
-      .trim();
-    if (!clean) return;
-    synthesizeSpeech(clean)
-      .then((blob) => {
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        audioQueueRef.current.push(audio);
-        if (!playingRef.current) playNextAudio();
-      })
-      .catch(() => {});
-  }, [playNextAudio]);
-
-  const handleVoiceTranscribed = useCallback((text: string) => {
-    const clean = text?.trim();
-    if (clean && clean.length > 1) {
-      setInput(clean);
-      pendingVoiceRef.current = true;
-    }
-  }, []);
-
-  const { state: speechState, error: speechError, available: speechAvailable, startRecording, stopRecording, startBargeInMonitor, stopBargeInMonitor } = useSpeech({
-    onTranscribed: handleVoiceTranscribed,
-  });
-  startRecordingRef.current = startRecording;
-  stopBargeInRef.current = stopBargeInMonitor;
-  startBargeInRef.current = startBargeInMonitor;
-
-  useEffect(() => {
-    if (speechError) toast.error(speechError);
-  }, [speechError]);
+  // (audio queue + useSpeech replaced by useAudioManager + useVoiceStream above)
 
   // Abort in-flight stream when the user switches models mid-generation.
   // This prevents errors from trying to continue a stream with a stale model.
@@ -252,36 +206,28 @@ export function InputArea() {
     prevModelRef.current = selectedModel;
   }, [selectedModel, streamState.isStreaming, resetStream]);
 
-  const micDisabled = !speechEnabled || !speechAvailable || streamState.isStreaming;
+  const micDisabled = !speechEnabled || voiceStream.available === false || streamState.isStreaming;
   const micReason: 'not-enabled' | 'no-backend' | 'streaming' | undefined =
     !speechEnabled ? 'not-enabled'
-    : !speechAvailable ? 'no-backend'
+    : voiceStream.available === false ? 'no-backend'
     : streamState.isStreaming ? 'streaming'
     : undefined;
 
   const handleMicClick = useCallback(async () => {
-    if (!speechAvailable) {
-      toast.error('Speech backend not available — check server config');
+    if (voiceStream.available === false) {
+      toast.error('Voice backend not available — check server config');
       return;
     }
-    // Interrupt Jarvis if he's speaking
-    interruptAudio();
-
-    if (speechState === 'recording') {
-      try {
-        const text = await stopRecording();
-        if (text && text.trim().length > 1) {
-          setInput(text.trim());
-          pendingVoiceRef.current = true;
-        }
-      } catch {
-        toast.error('Transcription failed');
-      }
+    if (wsVoiceActive) {
+      voiceStream.disconnect();
     } else {
+      audioManager.interruptAll();
       voiceInitiatedRef.current = true;
-      await startRecording();
+      await voiceStream.connect({ model: selectedModel }).catch(() => {
+        toast.error('Voice connection failed');
+      });
     }
-  }, [speechState, speechAvailable, startRecording, stopRecording, interruptAudio]);
+  }, [voiceStream, wsVoiceActive, selectedModel, audioManager]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -309,7 +255,6 @@ export function InputArea() {
 
     setInput('');
     sentenceBufferRef.current = '';
-    audioQueueRef.current = [];
 
     let convId = activeId;
     if (!convId) {
@@ -382,6 +327,8 @@ export function InputArea() {
       Array.from(researchSourcesByRef.values()).sort((a, b) => a.ref - b.ref);
     let lastFlush = 0;
     let ttftMs: number | undefined;
+
+    const ttsGen = audioManager.getGeneration();
 
     setStreamState({
       isStreaming: true,
@@ -589,14 +536,18 @@ export function InputArea() {
               accumulatedContent += delta.content;
               setStreamState({ content: accumulatedContent, phase: '' });
 
-              // Sentence-level TTS: queue audio as sentences complete
+              // Sentence-level TTS (only when WS voice is NOT active)
               if (speechEnabled) {
                 sentenceBufferRef.current += delta.content;
-                const sentenceMatch = sentenceBufferRef.current.match(/^([\s\S]*?[.!?])\s+([\s\S]*)$/);
-                if (sentenceMatch) {
-                  const completeSentence = sentenceMatch[1].trim();
-                  sentenceBufferRef.current = sentenceMatch[2];
-                  if (completeSentence) queueSentenceTTS(completeSentence);
+                const result = extractSentence(sentenceBufferRef.current);
+                if (result) {
+                  sentenceBufferRef.current = result.remainder;
+                  const clean = cleanForTTS(result.sentence);
+                  if (clean) {
+                    synthesizeSpeech(clean).then((blob) => {
+                      audioManager.enqueueBlob(URL.createObjectURL(blob), ttsGen);
+                    }).catch(() => {});
+                  }
                 }
               }
 
@@ -673,7 +624,12 @@ export function InputArea() {
 
       // Flush remaining sentence buffer for TTS
       if (speechEnabled && sentenceBufferRef.current.trim()) {
-        queueSentenceTTS(sentenceBufferRef.current);
+        const clean = cleanForTTS(sentenceBufferRef.current);
+        if (clean) {
+          synthesizeSpeech(clean).then((blob) => {
+            audioManager.enqueueBlob(URL.createObjectURL(blob), ttsGen);
+          }).catch(() => {});
+        }
         sentenceBufferRef.current = '';
       }
       voiceInitiatedRef.current = false;
@@ -702,7 +658,8 @@ export function InputArea() {
     temperature,
     maxTokens,
     speechEnabled,
-    queueSentenceTTS,
+    wsVoiceActive,
+    audioManager,
   ]);
 
   // Auto-send after voice transcription fills the input
@@ -844,7 +801,7 @@ export function InputArea() {
               <Paperclip size={16} />
             </button>
             <MicButton
-              state={speechState}
+              state={voiceStream.state}
               onClick={handleMicClick}
               disabled={micDisabled}
               reason={micReason}

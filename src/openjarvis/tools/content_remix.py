@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.types import ToolResult
+from openjarvis.tools._brand import brand_context
 from openjarvis.tools._stubs import BaseTool, ToolSpec
 
 _log = logging.getLogger(__name__)
@@ -74,23 +75,14 @@ def _build_remix_prompt(
     tone_guide = tone_guides.get(tone, tone_guides["professional"])
     angle_section = f"\n## Your Angle\n{angle}\n" if angle else ""
 
-    return f"""You are a content strategist for Syntra AI, an AI consulting firm that builds custom agentic workflows, voice AI agents, and automation systems for businesses.
+    return f"""You are a content strategist for the company described in the brand context below.
 
 ## Task
-Analyze the competitor content below and create a BETTER version for Syntra AI. Do NOT copy — use as inspiration to create something original that demonstrates deeper expertise.
+Analyze the competitor content below and create a BETTER branded version. Do NOT copy — use as inspiration to create something original that demonstrates deeper expertise.
 
 ## Original Content (Competitor)
 {original_content[:3000]}
-{angle_section}
-## Brand Voice — Syntra AI
-- We build AI that runs businesses, not just answers questions
-- Practical results over AI hype
-- Enterprise background (fintech, CJIS, HL7/FHIR) gives us credibility
-- We install custom agentic workflows — not cookie-cutter chatbots
-- Technical depth: LangChain, LangGraph, Claude API, custom agents
-- Real projects: freight management, healthcare data, voice AI agents
-
-## Platform: {platform.title()}
+{angle_section}{brand_context()}## Platform: {platform.title()}
 {platform_guide}
 
 ## Tone
@@ -100,7 +92,7 @@ Analyze the competitor content below and create a BETTER version for Syntra AI. 
 1. Identify the key topic/insight from the competitor content
 2. Take a stronger, more specific position
 3. Add concrete examples or data points the competitor missed
-4. Include a clear CTA relevant to Syntra AI's services
+4. Include a clear CTA relevant to the company's services
 5. Make it genuinely better — more insightful, more actionable, more engaging
 
 ## Output Format
@@ -229,7 +221,7 @@ class ContentRemixTool(BaseTool):
             except json.JSONDecodeError:
                 return ToolResult(
                     tool_name="content_remix",
-                    content=f"## Remixed Content\n\n{result.content}",
+                    content=f"## Remixed Content\n\n{response_text}",
                     success=True,
                     metadata={"raw": True, "source": source},
                 )

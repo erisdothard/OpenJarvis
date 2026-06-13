@@ -403,7 +403,10 @@ export async function synthesizeSpeech(text: string, voiceId?: string): Promise<
       speed: 1.0,
     }),
   });
-  if (!res.ok) throw new Error(`TTS failed: ${res.status}`);
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`TTS failed (${res.status}): ${detail || res.statusText}`);
+  }
   return res.blob();
 }
 

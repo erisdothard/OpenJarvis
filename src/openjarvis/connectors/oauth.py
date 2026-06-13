@@ -68,6 +68,16 @@ GOOGLE_ALL_SCOPES: List[str] = [
     "https://www.googleapis.com/auth/tasks.readonly",
 ]
 
+LINKEDIN_SCOPES: List[str] = [
+    "openid",
+    "profile",
+    "email",
+    "w_member_social",
+    # Add these back after LinkedIn approves Community Management API:
+    # "w_organization_social",  # post as Syntra AI company page
+    # "r_organization_social",  # read org posts
+]
+
 MICROSOFT_SCOPES: List[str] = [
     "offline_access",
     "Mail.Read",
@@ -76,6 +86,21 @@ MICROSOFT_SCOPES: List[str] = [
 ]
 
 OAUTH_PROVIDERS: Dict[str, OAuthProvider] = {
+    "linkedin": OAuthProvider(
+        name="linkedin",
+        display_name="LinkedIn",
+        auth_endpoint="https://www.linkedin.com/oauth/v2/authorization",
+        token_endpoint="https://www.linkedin.com/oauth/v2/accessToken",
+        scopes=LINKEDIN_SCOPES,
+        setup_url="https://www.linkedin.com/developers/apps",
+        setup_hint=(
+            "Create or update your LinkedIn app → Products → "
+            "request 'Community Management API' → OAuth 2.0 settings → "
+            "add redirect URI http://localhost:8789/callback"
+        ),
+        connector_ids=("linkedin",),
+        credential_files=("linkedin.json",),
+    ),
     "microsoft": OAuthProvider(
         name="microsoft",
         display_name="Microsoft",
@@ -107,6 +132,7 @@ OAUTH_PROVIDERS: Dict[str, OAuthProvider] = {
             "gcalendar",
             "gcontacts",
             "gmail",
+            "gmail_syntra",
             "google_tasks",
         ),
         credential_files=(
@@ -115,6 +141,7 @@ OAUTH_PROVIDERS: Dict[str, OAuthProvider] = {
             "gcalendar.json",
             "gcontacts.json",
             "gmail.json",
+            "gmail_syntra.json",
             "google_tasks.json",
         ),
     ),

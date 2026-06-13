@@ -32,6 +32,45 @@ _MAX_RETRIES = 3
 _AGENT_TICK_DEFAULT_MODEL = "groq/llama-3.3-70b-versatile"
 
 
+class _BatchEngineWrapper:
+    """Wraps an engine to route Anthropic generate() calls through the Batch API.
+
+    Transparent proxy — all attributes and methods delegate to the inner engine
+    except ``generate()``, which is intercepted for Anthropic models.
+    Streaming paths are NOT intercepted (batch API has no streaming).
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def generate(self, messages: Any, *, model: str, **kwargs: Any) -> Any:
+        """Route Anthropic models through batch_generate_single(), others normally."""
+        from openjarvis.engine.cloud import CloudEngine, _is_anthropic_model
+
+        # Unwrap to find the actual cloud engine (may be wrapped in
+        # InstrumentedEngine or another proxy layer).
+        inner = self._inner
+        while not isinstance(inner, CloudEngine):
+            candidate = getattr(inner, "_inner", None) or getattr(
+                inner, "_engine", None
+            )
+            if candidate is None or candidate is inner:
+                break
+            inner = candidate
+
+        if isinstance(inner, CloudEngine) and _is_anthropic_model(model):
+            logger.debug(
+                "BatchEngineWrapper: routing model=%s through batch API", model
+            )
+            return inner.batch_generate_single(messages, model=model, **kwargs)
+
+        # Not an Anthropic model or couldn't find CloudEngine — normal path.
+        return self._inner.generate(messages, model=model, **kwargs)
+
+
 class AgentExecutor:
     """Executes a single tick for a managed agent.
 
@@ -50,6 +89,9 @@ class AgentExecutor:
         self._manager = manager
         self._bus = event_bus
         self._trace_store = trace_store
+        from openjarvis.prompt.builder import SystemPromptCache
+
+        self._prompt_cache = SystemPromptCache()
 
     def set_system(self, system: Any) -> None:
         """Deferred system injection — called after JarvisSystem is constructed."""
@@ -546,13 +588,17 @@ class AgentExecutor:
             # longer apply to CLI calls only (#376).
             cfg = getattr(self._system, "config", None)
             if cfg is not None and _accepts("prompt_builder"):
-                from openjarvis.prompt.builder import SystemPromptBuilder
-
-                state_kwargs["prompt_builder"] = SystemPromptBuilder(
-                    agent_template=getattr(
-                        cfg.agent, "default_system_prompt", ""
-                    )
-                    or "",
+                agent_template = (
+                    getattr(cfg.agent, "default_system_prompt", "") or ""
+                )
+                # Use the per-executor cache so repeated agent ticks don't
+                # re-read SOUL/MEMORY/USER.md from disk each time.  The cache
+                # is mtime-aware: it rebuilds only when a file actually changes.
+                # get_or_create() returns a real SystemPromptBuilder whose
+                # frozen prefix is already computed, so .build(), .sections(),
+                # and .persona_sections() are all O(1) on the returned clone.
+                state_kwargs["prompt_builder"] = self._prompt_cache.get_or_create(
+                    agent_template=agent_template,
                     memory_files_config=cfg.memory_files,
                     system_prompt_config=cfg.system_prompt,
                 )
@@ -701,6 +747,41 @@ class AgentExecutor:
                 pass  # Don't break agent tick if memory retrieval fails
 
         agent_ctx.memory_results = memory_results
+
+        # --- Batch API routing ---
+        # Check agent config's batch_mode and optionally wrap the engine so
+        # generate() calls for Anthropic models go through the Batch API
+        # (50% cost reduction for non-realtime scheduled ticks).
+        batch_mode = config.get("batch_mode", "auto")
+        _should_batch = False
+
+        if batch_mode == "always":
+            _should_batch = True
+        elif batch_mode == "auto":
+            # Auto: use batch only when the agent has no tools (tool-calling
+            # agents need real-time responses) and is being run on a
+            # cron/interval schedule (not a user-driven interactive message).
+            _has_no_tools = not tool_instances
+            _is_scheduled = not pending  # no pending user messages → scheduled tick
+            _should_batch = _has_no_tools and _is_scheduled
+        # "never" → _should_batch stays False
+
+        if _should_batch:
+            try:
+                from openjarvis.engine.cloud import _is_anthropic_model
+
+                if _is_anthropic_model(model):
+                    logger.info(
+                        "Agent %s: batch_mode=%s, wrapping engine with BatchAPI",
+                        agent["name"],
+                        batch_mode,
+                    )
+                    agent_instance._engine = _BatchEngineWrapper(
+                        agent_instance._engine
+                    )
+            except Exception:
+                pass  # Non-critical — fall through to normal path
+
         self._set_activity(agent["id"], "Generating response...")
         logger.info(
             "Agent %s: calling agent.run() with %d chars input",
@@ -710,18 +791,13 @@ class AgentExecutor:
         _t0 = time.time()
         result = agent_instance.run(input_text, context=agent_ctx)
 
-        # Retry once if the model returned empty content (common with
-        # Qwen3.5 thinking mode consuming all tokens).
+        # Log a warning on empty content — no retry (retry doubles API cost).
         if not (result.content or "").strip():
-            self._set_activity(
-                agent["id"],
-                "Retrying (empty response)...",
-            )
             logger.warning(
-                "Agent %s: empty content, retrying once",
+                "Agent %s: empty content returned, skipping retry",
                 agent["name"],
             )
-            result = agent_instance.run(input_text, context=agent_ctx)
+            result.content = "[No response generated. The model may need a larger token budget.]"
 
         _elapsed = time.time() - _t0
         logger.info(

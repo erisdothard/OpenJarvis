@@ -31,13 +31,13 @@ export function SystemPulse({ apiReachable }: { apiReachable: boolean | null }) 
       height: '1px',
     },
     inferencing: {
-      background: 'linear-gradient(90deg, #ff0080, #ff6d00, #ffea00, #00ff87, #00e5ff, #8c00ff, #ff0080)',
+      background: 'linear-gradient(90deg, #6a6c78, #d8dae4, #00e5ff, #3df2dd, #d8dae4, #9a9cae, #6a6c78)',
       backgroundSize: '300% 100%',
       animation: 'chroma-travel 2s linear infinite',
       height: '2px',
     },
     'agent-active': {
-      background: 'linear-gradient(90deg, #00e5ff, #00ff87, #ffea00, #ff6d00, #ff0080, #8c00ff, #00e5ff)',
+      background: 'linear-gradient(90deg, #3df2dd, #00e5ff, #d8dae4, #00bcd4, #3df2dd, #00e5ff, #3df2dd)',
       backgroundSize: '300% 100%',
       animation: 'chroma-travel 1.2s linear infinite',
       height: '2px',

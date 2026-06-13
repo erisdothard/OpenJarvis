@@ -253,6 +253,37 @@ def _annotate_anthropic_cache(messages: list[dict]) -> list[dict]:
     return result
 
 
+def _system_text_to_cache_block(system_text: str) -> list[dict]:
+    """Convert a plain system string to an Anthropic cache_control block list.
+
+    Anthropic's prompt caching requires the ``system`` parameter to be a list
+    of content blocks rather than a plain string.  Marking the block with
+    ``cache_control: {"type": "ephemeral"}`` enables server-side caching of
+    the system prompt (~90 % cost reduction on cached tokens).
+    """
+    return [
+        {
+            "type": "text",
+            "text": system_text,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
+def _annotate_tools_cache(tools: list[dict]) -> list[dict]:
+    """Mark the last tool definition with cache_control for Anthropic caching.
+
+    Anthropic caches tool definitions when the last tool in the list carries
+    ``cache_control: {"type": "ephemeral"}``.  All preceding tools are
+    included in the same cache bucket automatically.
+    """
+    if not tools:
+        return tools
+    annotated = list(tools)
+    annotated[-1] = {**annotated[-1], "cache_control": {"type": "ephemeral"}}
+    return annotated
+
+
 def _convert_tools_to_anthropic(
     openai_tools: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -698,6 +729,12 @@ class CloudEngine(InferenceEngine):
                     "type": "tool",
                     "name": "json_output",
                 }
+
+        # Apply Anthropic prompt caching: annotate system and last tool.
+        if system_text:
+            create_kwargs["system"] = _system_text_to_cache_block(system_text)
+        if create_kwargs.get("tools"):
+            create_kwargs["tools"] = _annotate_tools_cache(create_kwargs["tools"])
 
         t0 = time.monotonic()
         resp = self._anthropic_client.messages.create(**create_kwargs)
@@ -1237,7 +1274,8 @@ class CloudEngine(InferenceEngine):
             "max_tokens": max_tokens,
         }
         if system_text:
-            create_kwargs["system"] = system_text
+            # Apply Anthropic prompt caching on the system prompt.
+            create_kwargs["system"] = _system_text_to_cache_block(system_text)
         with self._anthropic_client.messages.stream(**create_kwargs) as stream:
             for text in stream.text_stream:
                 yield text
@@ -1504,6 +1542,12 @@ class CloudEngine(InferenceEngine):
             create_kwargs["tools"] = _convert_tools_to_anthropic(raw_tools)
         kwargs.pop("tool_choice", None)
 
+        # Apply Anthropic prompt caching: annotate system and last tool.
+        if system_text:
+            create_kwargs["system"] = _system_text_to_cache_block(system_text)
+        if create_kwargs.get("tools"):
+            create_kwargs["tools"] = _annotate_tools_cache(create_kwargs["tools"])
+
         with self._anthropic_client.messages.stream(**create_kwargs) as stream:
             tool_index = -1
             for event in stream:
@@ -1593,6 +1637,320 @@ class CloudEngine(InferenceEngine):
         else:
             async for chunk in self._stream_full_openai(messages, **kw):
                 yield chunk
+
+    # ------------------------------------------------------------------
+    # Anthropic Message Batches API — 50% cost reduction for non-realtime
+    # ------------------------------------------------------------------
+
+    def batch_generate_anthropic(
+        self,
+        requests: list[dict],
+        *,
+        poll_interval: float = 5.0,
+        max_wait: float = 300.0,
+    ) -> list[dict]:
+        """Submit requests via Anthropic Message Batches API (50% cost).
+
+        Each request dict must contain:
+            custom_id   – caller-assigned unique string per request
+            model       – Anthropic model ID
+            messages    – list of Anthropic-format message dicts
+            max_tokens  – int
+            system      – optional str
+            temperature – optional float
+            tools       – optional list of Anthropic-format tool dicts
+
+        Returns a list of result dicts (ordered to match input) with keys:
+            custom_id, content, tool_calls, usage, finish_reason,
+            cost_usd, error (only on failure)
+        """
+        if self._anthropic_client is None:
+            raise EngineConnectionError(
+                "Anthropic client not available — set "
+                "ANTHROPIC_API_KEY and install openjarvis[inference-cloud]"
+            )
+
+        # Build batch request items in Anthropic format
+        batch_requests = []
+        for req in requests:
+            params: Dict[str, Any] = {
+                "model": req["model"],
+                "messages": req["messages"],
+                "max_tokens": req.get("max_tokens", 4096),
+            }
+            if req.get("system"):
+                params["system"] = _system_text_to_cache_block(req["system"])
+            if "temperature" in req:
+                params["temperature"] = req["temperature"]
+            if req.get("tools"):
+                params["tools"] = _annotate_tools_cache(req["tools"])
+
+            batch_requests.append(
+                {
+                    "custom_id": req["custom_id"],
+                    "params": params,
+                }
+            )
+
+        logger.info(
+            "Submitting Anthropic batch with %d request(s)", len(batch_requests)
+        )
+        t0 = time.monotonic()
+
+        try:
+            batch = self._anthropic_client.messages.batches.create(
+                requests=batch_requests
+            )
+        except Exception as exc:
+            raise EngineConnectionError(
+                f"Anthropic batch create failed: {exc}"
+            ) from exc
+
+        batch_id = batch.id
+        logger.info("Anthropic batch %s submitted, polling...", batch_id)
+
+        # Poll until processing_status == "ended" or timeout
+        deadline = time.monotonic() + max_wait
+        while True:
+            try:
+                batch = self._anthropic_client.messages.batches.retrieve(batch_id)
+            except Exception as exc:
+                raise EngineConnectionError(
+                    f"Anthropic batch retrieve failed for {batch_id}: {exc}"
+                ) from exc
+
+            status = getattr(batch, "processing_status", None)
+            if status == "ended":
+                break
+
+            if time.monotonic() > deadline:
+                # Cancel batch on timeout to avoid unexpected charges
+                try:
+                    self._anthropic_client.messages.batches.cancel(batch_id)
+                    logger.warning(
+                        "Anthropic batch %s cancelled after %.0fs timeout",
+                        batch_id,
+                        max_wait,
+                    )
+                except Exception:
+                    pass
+                raise EngineConnectionError(
+                    f"Anthropic batch {batch_id} did not complete within "
+                    f"{max_wait}s — batch cancelled"
+                )
+
+            logger.debug(
+                "Batch %s status=%s, sleeping %.1fs", batch_id, status, poll_interval
+            )
+            time.sleep(poll_interval)
+
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "Anthropic batch %s ended in %.1fs, fetching results", batch_id, elapsed
+        )
+
+        # Build a lookup by custom_id from submitted requests
+        req_by_id = {r["custom_id"]: r for r in requests}
+
+        # Retrieve and parse results
+        results_by_id: Dict[str, dict] = {}
+        try:
+            for result_item in self._anthropic_client.messages.batches.results(
+                batch_id
+            ):
+                cid = result_item.custom_id
+                result_type = getattr(result_item, "result", None)
+                if result_type is None:
+                    results_by_id[cid] = {
+                        "custom_id": cid,
+                        "error": "missing result object",
+                    }
+                    continue
+
+                outcome_type = getattr(result_type, "type", "error")
+
+                if outcome_type == "succeeded":
+                    resp = result_type.message
+                    orig_req = req_by_id.get(cid, {})
+                    model_used = orig_req.get("model", "")
+
+                    content_parts: list[str] = []
+                    tool_calls: list[Dict[str, Any]] = []
+                    tool_results: list[Dict[str, Any]] = []
+                    content_blocks: list[Dict[str, Any]] = []
+
+                    for block in resp.content:
+                        btype = (
+                            getattr(block, "type", None) or type(block).__name__
+                        )
+                        serialized = _serialize_anthropic_block(block)
+                        content_blocks.append(serialized)
+                        if btype == "tool_use":
+                            block_id = getattr(block, "id", None)
+                            if block_id:
+                                tool_calls.append(
+                                    {
+                                        "id": block_id,
+                                        "name": getattr(block, "name", ""),
+                                        "arguments": json.dumps(
+                                            getattr(block, "input", None)
+                                        )
+                                        if isinstance(
+                                            getattr(block, "input", None), dict
+                                        )
+                                        else str(getattr(block, "input", "")),
+                                    }
+                                )
+                        elif btype in ("web_search_tool_result", "tool_result"):
+                            tool_results.append(serialized)
+                        elif hasattr(block, "text"):
+                            content_parts.append(block.text)
+
+                    content = "\n".join(content_parts) if content_parts else ""
+                    prompt_tokens = resp.usage.input_tokens if resp.usage else 0
+                    completion_tokens = resp.usage.output_tokens if resp.usage else 0
+
+                    item_result: Dict[str, Any] = {
+                        "custom_id": cid,
+                        "content": content,
+                        "usage": {
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens + completion_tokens,
+                        },
+                        "model": getattr(resp, "model", model_used),
+                        "finish_reason": getattr(resp, "stop_reason", None)
+                        or "stop",
+                        "cost_usd": estimate_cost(
+                            model_used, prompt_tokens, completion_tokens
+                        )
+                        * 0.5,  # Batch API is 50% of standard price
+                        "content_blocks": content_blocks,
+                    }
+                    if tool_calls:
+                        item_result["tool_calls"] = tool_calls
+                    if tool_results:
+                        item_result["tool_results"] = tool_results
+
+                    results_by_id[cid] = item_result
+
+                elif outcome_type == "errored":
+                    err_obj = getattr(result_type, "error", None)
+                    err_msg = (
+                        getattr(err_obj, "message", str(err_obj))
+                        if err_obj
+                        else "unknown error"
+                    )
+                    results_by_id[cid] = {
+                        "custom_id": cid,
+                        "error": err_msg,
+                    }
+                    logger.warning(
+                        "Anthropic batch %s item %s failed: %s",
+                        batch_id,
+                        cid,
+                        err_msg,
+                    )
+                else:
+                    results_by_id[cid] = {
+                        "custom_id": cid,
+                        "error": f"unexpected result type: {outcome_type}",
+                    }
+        except Exception as exc:
+            raise EngineConnectionError(
+                f"Anthropic batch results fetch failed for {batch_id}: {exc}"
+            ) from exc
+
+        # Return results in the same order as the input requests
+        ordered: list[dict] = []
+        for req in requests:
+            cid = req["custom_id"]
+            ordered.append(
+                results_by_id.get(
+                    cid,
+                    {"custom_id": cid, "error": "result missing from batch response"},
+                )
+            )
+        return ordered
+
+    def batch_generate_single(
+        self,
+        messages: "Sequence[Message]",
+        *,
+        model: str,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        **kwargs: Any,
+    ) -> dict:
+        """Single-request batch — same interface as generate() but via Batch API.
+
+        Uses the Anthropic Message Batches API at 50% the standard cost.
+        Blocks until the single-item batch completes (up to max_wait seconds).
+        Falls back to standard generate() if batch API is unavailable.
+        """
+        if self._anthropic_client is None or not _is_anthropic_model(model):
+            return self._generate_anthropic(
+                messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+
+        import uuid
+
+        custom_id = f"single-{uuid.uuid4().hex[:12]}"
+        system_text, chat_msgs = self._prepare_anthropic_messages(messages)
+
+        raw_tools = kwargs.pop("tools", None)
+        anthropic_tools = _convert_tools_to_anthropic(raw_tools) if raw_tools else None
+
+        req: Dict[str, Any] = {
+            "custom_id": custom_id,
+            "model": model,
+            "messages": chat_msgs,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if system_text:
+            req["system"] = system_text
+        if anthropic_tools:
+            req["tools"] = anthropic_tools
+
+        try:
+            results = self.batch_generate_anthropic(
+                [req],
+                poll_interval=kwargs.pop("poll_interval", 5.0),
+                max_wait=kwargs.pop("max_wait", 300.0),
+            )
+        except EngineConnectionError:
+            # Graceful fallback to standard path if batch fails
+            logger.warning(
+                "Batch API unavailable for model %s, falling back to standard generate",
+                model,
+            )
+            return self._generate_anthropic(
+                messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+
+        result = results[0]
+        if "error" in result:
+            logger.warning(
+                "Batch single-request failed (%s), falling back to standard generate",
+                result["error"],
+            )
+            return self._generate_anthropic(
+                messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+        return result
 
     def list_models(self) -> List[str]:
         models: List[str] = []

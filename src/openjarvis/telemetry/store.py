@@ -259,6 +259,21 @@ INSERT INTO mining_stats (
             except Exception as exc:
                 logger.debug("Failed to record telemetry event: %s", exc)
 
+    def purge(self, max_age_days: int = 30) -> int:
+        """Delete telemetry rows older than *max_age_days*.
+
+        The ``timestamp`` column is a Unix epoch float, so the cutoff is
+        computed as ``time.time() - max_age_days * 86400``.
+
+        Returns the number of rows deleted.
+        """
+        cutoff = time.time() - max_age_days * 86400
+        cur = self._conn.execute(
+            "DELETE FROM telemetry WHERE timestamp < ?", (cutoff,)
+        )
+        self._conn.commit()
+        return cur.rowcount
+
     def close(self) -> None:
         """Close the underlying SQLite connection."""
         self._conn.close()

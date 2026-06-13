@@ -73,6 +73,27 @@ def serve(
 
     config = load_config()
 
+    # Audit sensitive file permissions and clean up orphan databases
+    try:
+        from openjarvis.core.config import DEFAULT_CONFIG_DIR
+        from openjarvis.security.file_utils import audit_config_permissions
+
+        _corrected = audit_config_permissions(DEFAULT_CONFIG_DIR)
+        if _corrected:
+            logger.debug(
+                "Corrected permissions on %d sensitive file(s): %s",
+                len(_corrected),
+                ", ".join(_corrected),
+            )
+
+        # Remove zero-byte orphan checkpoint database left by prior runs
+        orphan = DEFAULT_CONFIG_DIR / "sync_checkpoints.db"
+        if orphan.exists() and orphan.stat().st_size == 0:
+            orphan.unlink()
+            logger.debug("Removed empty orphan: %s", orphan)
+    except Exception as _perm_exc:
+        logger.debug("Startup permission audit failed: %s", _perm_exc)
+
     # Resolve host/port from CLI args or config
     bind_host = host or config.server.host
     bind_port = port or config.server.port
@@ -115,6 +136,20 @@ def serve(
     # If cloud API keys are set, wrap with MultiEngine so both local
     # and cloud models appear in the model list and can be used.
     import os
+    from pathlib import Path as _Path
+
+    # Pre-load API keys from cloud-keys.env so they're available for
+    # the _has_cloud check even when the server is started outside of
+    # a login shell (e.g. start.sh, launchd).
+    _keys_file = _Path.home() / ".openjarvis" / "cloud-keys.env"
+    if _keys_file.exists():
+        for _raw_line in _keys_file.read_text().splitlines():
+            _line = _raw_line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                _k, _v = _k.strip(), _v.strip()
+                if _v and not os.environ.get(_k):
+                    os.environ[_k] = _v
 
     _has_cloud = (
         os.environ.get("OPENAI_API_KEY")
@@ -405,6 +440,25 @@ def serve(
                         )
                         console.print(f"  {agent_name}: [cyan]auto-registered[/cyan]")
 
+            # Auto-create check-in managed agent if enabled
+            if getattr(config, "checkin", None) and getattr(config.checkin, "enabled", False):
+                existing_agents = agent_manager.list_agents()
+                existing_names = {a.get("name", "") for a in existing_agents}
+                if "Daily Check-In" not in existing_names:
+                    agent_manager.create_agent(
+                        name="Daily Check-In",
+                        agent_type="checkin",
+                        config={
+                            "model": model_name,
+                            "schedule_type": "cron",
+                            "schedule_value": config.checkin.schedule,
+                            "phone": config.checkin.phone,
+                            "timezone": config.checkin.timezone,
+                            "reply_timeout_minutes": config.checkin.reply_timeout_minutes,
+                        },
+                    )
+                    console.print("  Check-In:  [cyan]auto-registered (4 PM daily)[/cyan]")
+
             agent_scheduler = AgentScheduler(
                 manager=agent_manager,
                 executor=executor,
@@ -421,6 +475,37 @@ def serve(
             console.print("  Scheduler: [cyan]active[/cyan]")
         except Exception as exc:
             logger.debug("Agent scheduler init failed: %s", exc)
+
+    # Start reminder/calendar notifier (texts you when items are due)
+    if getattr(config, "checkin", None) and getattr(config.checkin, "phone", ""):
+        try:
+            from openjarvis.agents.reminder_notifier import start_notifier
+
+            start_notifier(config.checkin.phone)
+            console.print("  Notifier:  [cyan]active (reminders + calendar)[/cyan]")
+        except Exception as exc:
+            logger.debug("Reminder notifier init failed: %s", exc)
+
+    # Start social post scheduler (publishes approved posts on schedule)
+    try:
+        import threading
+        from openjarvis.tools.social_publish import run_social_scheduler
+
+        def _social_scheduler_loop():
+            import time as _time
+            while True:
+                try:
+                    run_social_scheduler()
+                except Exception as exc:
+                    logger.debug("Social scheduler tick error: %s", exc)
+                _time.sleep(60)
+
+        _social_thread = threading.Thread(
+            target=_social_scheduler_loop, daemon=True, name="social-scheduler"
+        )
+        _social_thread.start()
+    except Exception as exc:
+        logger.debug("Social scheduler init failed: %s", exc)
 
     # Set up memory backend for context injection
     memory_backend = None
@@ -596,6 +681,7 @@ def serve(
         speech_backend=speech_backend,
         agent_manager=agent_manager,
         agent_scheduler=agent_scheduler,
+        telem_store=telem_store,
         api_key=api_key,
         webhook_config=webhook_config,
         cors_origins=config.server.cors_origins,

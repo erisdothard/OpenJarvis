@@ -35,11 +35,25 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from openjarvis.tools._brand import load_brand as _load_brand
+
 logger = logging.getLogger(__name__)
 
 _subscriber_future: Optional[Any] = None
 _subscriber_client: Optional[Any] = None
 _last_history_id: Optional[str] = None
+_triage_client: Optional[Any] = None
+
+
+def _get_triage_client() -> Any:
+    """Return a singleton Anthropic client, creating it on first call."""
+    global _triage_client
+    if _triage_client is None:
+        import anthropic
+
+        _triage_client = anthropic.Anthropic(timeout=15)
+    return _triage_client
+
 
 _GMAIL_CREDS_PATH = Path.home() / ".openjarvis" / "connectors" / "gmail.json"
 _GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -55,24 +69,40 @@ _JUNK_SENDER_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Triage prompt — gives the LLM context so it can judge importance.
-# This prompt targets the Syntra AI business account (ai.syntra@gmail.com).
-_TRIAGE_SYSTEM = (
-    "You are an email triage assistant for the Syntra AI business account. "
-    "Syntra AI is an AI consulting firm co-founded by Eris Dothard in Nashville, TN. "
-    "Services: AI workflow automation, custom software with AI, retainer/maintenance. "
-    "Active client project: FreightX (freight marketplace for 3 Aces Trucking). "
-    "The firm is ramping up outreach to land its first clients.\n\n"
-    "Decide whether this email is IMPORTANT enough to send a text message alert. "
-    "IMPORTANT means: potential customer inquiries, client emails (especially 3 Aces / FreightX), "
-    "business partnership or service requests, responses to outreach campaigns, "
-    "calendar invitations, financial/billing alerts (Stripe, invoices, payments), "
-    "domain/hosting issues, security alerts, or anything time-sensitive for the business.\n\n"
-    "NOT important: marketing, newsletters, SaaS product updates, social media notifications, "
-    "promotional offers, automated digests, shipping updates, app notifications, "
-    "routine GitHub notifications, developer tool announcements, or mass emails.\n\n"
-    "Reply with ONLY 'yes' or 'no'. Nothing else."
-)
+def _get_triage_system() -> str:
+    """Build the triage system prompt, pulling company name from brand config."""
+    brand = _load_brand()
+    # Extract company name from brand.md '## Company' section, fallback to generic.
+    company_name = "your business"
+    in_company_section = False
+    for line in brand.splitlines():
+        if line.strip() == "## Company":
+            in_company_section = True
+            continue
+        if in_company_section:
+            if line.startswith("## "):
+                break  # left the Company section without finding a value
+            stripped = line.strip()
+            if stripped:
+                company_name = stripped.split(" — ")[0].strip()
+                break
+    return (
+        f"You are an email triage assistant for the {company_name} business account. "
+        "Decide whether this email is IMPORTANT enough to send a text message alert. "
+        "IMPORTANT means: potential customer inquiries, client emails, "
+        "business partnership or service requests, responses to outreach campaigns, "
+        "calendar invitations, financial/billing alerts (Stripe, invoices, payments), "
+        "domain/hosting issues, security alerts, or anything time-sensitive for the business.\n\n"
+        "NOT important: marketing, newsletters, SaaS product updates, social media notifications, "
+        "promotional offers, automated digests, shipping updates, app notifications, "
+        "routine GitHub notifications, developer tool announcements, or mass emails.\n\n"
+        "Reply with ONLY 'yes' or 'no'. Nothing else."
+    )
+
+
+# Triage prompt — built at call time from brand config.
+# This prompt targets the business email account.
+_TRIAGE_SYSTEM = _get_triage_system()
 
 
 # -- Gmail API helper functions (match call_with_refresh pattern) ----------
@@ -177,14 +207,12 @@ def _llm_triage(subject: str, sender: str, snippet: str) -> bool:
     """Ask a fast LLM whether this email warrants an alert. Returns True/False."""
     user_msg = f"From: {sender}\nSubject: {subject}\nPreview: {snippet[:300]}"
     try:
-        import anthropic
-
-        client = anthropic.Anthropic(timeout=15)
+        client = _get_triage_client()
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=3,
             temperature=0.0,
-            system=_TRIAGE_SYSTEM,
+            system=[{"type": "text", "text": _TRIAGE_SYSTEM, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user_msg}],
         )
         answer = "".join(
@@ -196,6 +224,144 @@ def _llm_triage(subject: str, sender: str, snippet: str) -> bool:
     except Exception as exc:
         logger.warning("LLM triage failed, defaulting to skip: %s", exc)
         return False
+
+
+def _llm_triage_batch(emails: List[Dict[str, str]]) -> List[bool]:
+    """Triage a batch of emails in a single API call when possible.
+
+    Args:
+        emails: List of dicts with keys: subject, sender, snippet.
+
+    Returns:
+        List of bools, one per email, True meaning important.
+    """
+    if not emails:
+        return []
+    if len(emails) == 1:
+        e = emails[0]
+        return [_llm_triage(e["subject"], e["sender"], e["snippet"])]
+
+    # Build a numbered list for the multi-email prompt.
+    lines: List[str] = []
+    for i, e in enumerate(emails, start=1):
+        lines.append(
+            f"{i}. From: {e['sender']}\n"
+            f"   Subject: {e['subject']}\n"
+            f"   Preview: {e['snippet'][:200]}"
+        )
+    user_msg = (
+        "Evaluate each email below and reply with ONLY a numbered list, one per line, "
+        "in the format '1 yes' or '1 no'. Example:\n"
+        "1 yes\n2 no\n3 yes\n\nEmails:\n\n" + "\n\n".join(lines)
+    )
+
+    batch_system = (
+        _TRIAGE_SYSTEM.rstrip()
+        + "\n\nWhen given multiple emails, reply with a numbered list only: "
+        "'<n> yes' or '<n> no' per line, one line per email. No other text."
+    )
+
+    try:
+        client = _get_triage_client()
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=len(emails) * 10,
+            temperature=0.0,
+            system=[{"type": "text", "text": batch_system, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        raw = "".join(b.text for b in resp.content if hasattr(b, "text")).strip()
+        logger.debug("LLM batch triage raw response: %r", raw)
+
+        # Parse "N yes/no" lines.
+        result_map: Dict[int, bool] = {}
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[0].isdigit():
+                idx = int(parts[0])
+                answer = parts[1].lower()
+                if 1 <= idx <= len(emails):
+                    result_map[idx] = answer.startswith("yes")
+
+        if len(result_map) == len(emails):
+            results = [result_map[i] for i in range(1, len(emails) + 1)]
+            for i, (e, r) in enumerate(zip(emails, results), start=1):
+                logger.debug(
+                    "LLM batch triage [%d/%d]: %s → %s",
+                    i, len(emails), e["subject"][:50], "ALERT" if r else "skip",
+                )
+            return results
+
+        logger.warning(
+            "Batch triage parse failed (got %d/%d results), falling back to individual calls",
+            len(result_map), len(emails),
+        )
+    except Exception as exc:
+        logger.warning("LLM batch triage failed, falling back to individual calls: %s", exc)
+
+    # Fallback: call individually.
+    return [_llm_triage(e["subject"], e["sender"], e["snippet"]) for e in emails]
+
+
+def _prefetch_and_prefilter(
+    msg_id: str, important_senders: List[str]
+) -> Optional[Dict[str, Any]]:
+    """Fetch message metadata and run pre-filter + auto-pass logic without LLM.
+
+    Returns:
+        None  — email is filtered out (definite skip).
+        dict with auto_pass=True  — email passes without LLM (starred / sender match).
+        dict with auto_pass=False — email needs LLM triage; includes snippet.
+    """
+    try:
+        from openjarvis.connectors.google_auth import call_with_refresh
+
+        data = call_with_refresh(
+            _api_get_message,
+            str(_GMAIL_CREDS_PATH),
+            msg_id=msg_id,
+        )
+        labels = set(data.get("labelIds", []))
+        headers = {
+            h["name"]: h["value"]
+            for h in data.get("payload", {}).get("headers", [])
+        }
+        sender = headers.get("From", "")
+        subject = headers.get("Subject", "(no subject)")
+        snippet = data.get("snippet", "")
+        has_unsubscribe = "List-Unsubscribe" in headers
+
+        # --- Stage 1: Pre-filter obvious junk (no API call) ---
+        if labels & _JUNK_LABELS:
+            logger.debug("Pre-filter skip (junk label): %s", subject[:50])
+            return None
+        if _JUNK_SENDER_RE.search(sender):
+            logger.debug("Pre-filter skip (junk sender): %s", sender[:50])
+            return None
+        if has_unsubscribe:
+            passthrough_keywords = ("stripe", "quickbooks", "square",
+                                    "calendly", "hubspot", "freshdesk",
+                                    "3aces", "freightx")
+            if not any(kw in sender.lower() for kw in passthrough_keywords):
+                logger.debug("Pre-filter skip (unsubscribe header): %s", subject[:50])
+                return None
+
+        # --- Stage 2: Auto-pass (starred or explicit sender match) ---
+        if "STARRED" in labels:
+            return {"subject": subject, "sender": sender, "snippet": snippet, "auto_pass": True}
+        if important_senders and any(
+            s.lower() in sender.lower() for s in important_senders
+        ):
+            return {"subject": subject, "sender": sender, "snippet": snippet, "auto_pass": True}
+
+        # Needs LLM triage.
+        return {"subject": subject, "sender": sender, "snippet": snippet, "auto_pass": False}
+    except Exception as exc:
+        logger.debug("Message prefetch failed for %s: %s", msg_id, exc)
+        return None
 
 
 def _check_importance(
@@ -292,13 +458,37 @@ def _on_pubsub_message(
     start_id = _last_history_id or new_history_id
     new_messages = _fetch_new_messages(start_id)
 
+    # Pass 1: fetch metadata and pre-filter (no LLM cost).
+    # Collect candidates that survive the pre-filter but need LLM triage.
+    auto_alerts: List[Dict[str, str]] = []
+    triage_candidates: List[Dict[str, str]] = []
+
     for msg in new_messages:
         msg_id = msg.get("id", "")
         if not msg_id:
             continue
-        result = _check_importance(msg_id, important_senders)
-        if result:
-            _send_email_alert(phone, result["subject"], result["sender"])
+        pre = _prefetch_and_prefilter(msg_id, important_senders)
+        if pre is None:
+            continue
+        if pre.get("auto_pass"):
+            auto_alerts.append({"subject": pre["subject"], "sender": pre["sender"]})
+        else:
+            triage_candidates.append(pre)
+
+    # Send alerts for auto-passed emails immediately.
+    for alert in auto_alerts:
+        _send_email_alert(phone, alert["subject"], alert["sender"])
+
+    # Pass 2: batch LLM triage for the remaining candidates.
+    if triage_candidates:
+        batch_emails = [
+            {"subject": c["subject"], "sender": c["sender"], "snippet": c["snippet"]}
+            for c in triage_candidates
+        ]
+        decisions = _llm_triage_batch(batch_emails)
+        for candidate, important in zip(triage_candidates, decisions):
+            if important:
+                _send_email_alert(phone, candidate["subject"], candidate["sender"])
 
     _last_history_id = new_history_id
     message.ack()

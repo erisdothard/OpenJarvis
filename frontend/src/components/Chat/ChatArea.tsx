@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router';
 import { MessageBubble } from './MessageBubble';
 import { InputArea } from './InputArea';
 import { StreamingDots } from './StreamingDots';
-import { VoiceAgent } from './VoiceAgent';
 import { useAppStore } from '../../lib/store';
 import { PanelRightOpen, PanelRightClose, Database, X, Sparkles, Mail, Search as SearchIcon, Bot } from 'lucide-react';
 import { listConnectors } from '../../lib/connectors-api';
@@ -164,7 +163,6 @@ export function ChatArea() {
           </div>
         )}
       </div>
-      <VoiceAgent />
       <InputArea />
     </div>
   );

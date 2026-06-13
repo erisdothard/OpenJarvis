@@ -50,8 +50,8 @@
 }
 .orb-glow[data-state="speaking"] {
   box-shadow:
-    0 0 calc(15px + var(--audio-level) * 40px) rgba(61, 242, 221, 0.3),
-    0 0 calc(30px + var(--audio-level) * 50px) rgba(140, 0, 255, 0.15);
+    0 0 calc(15px + var(--audio-level) * 40px) rgba(61, 242, 221, 0.35),
+    0 0 calc(30px + var(--audio-level) * 50px) rgba(61, 242, 221, 0.12);
 }
 
 /* ── Main orb body ── */
@@ -98,7 +98,7 @@
 .orb-rim[data-state="speaking"] {
   background: conic-gradient(
     from var(--pt-spin, 0deg),
-    #3df2dd, #8c00ff, #ff00aa, #3df2dd, #00e5ff, #3df2dd
+    #3df2dd, #00e5ff, #2ac4b8, #00e5ff, #3df2dd
   );
   opacity: calc(0.6 + var(--audio-level) * 0.4);
   animation-duration: 5s;
@@ -181,8 +181,8 @@
   animation: pt-beat 0.8s ease-in-out infinite;
 }
 .orb-indicator[data-state="speaking"] {
-  background: linear-gradient(135deg, #3df2dd, #8c00ff);
-  box-shadow: 0 0 10px rgba(61, 242, 221, 0.7);
+  background: #3df2dd;
+  box-shadow: 0 0 10px rgba(61, 242, 221, 0.9);
 }
 
 /* ── Floating state label ── */
@@ -207,8 +207,8 @@
   text-shadow: 0 0 12px rgba(255, 179, 0, 0.5);
 }
 .orb-state-label[data-state="speaking"] {
-  color: #c8b0ff;
-  text-shadow: 0 0 12px rgba(140, 0, 255, 0.5);
+  color: #3df2dd;
+  text-shadow: 0 0 12px rgba(61, 242, 221, 0.6);
 }
 
 /* ── Thinking pulse keyframe ── */

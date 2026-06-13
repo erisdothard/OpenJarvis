@@ -90,8 +90,8 @@ backend = "faster-whisper"                  # Local STT (no API key needed)
 model = "base"                              # Whisper model: tiny, base, small, medium, large-v3
 device = "auto"                             # auto, cpu, cuda
 compute_type = "int8"                       # int8 for Apple Silicon (float16 not supported)
-tts_backend = "elevenlabs"                  # ElevenLabs — high-quality voice synthesis
-tts_voice_id = "onwK4e9ZLuTAKqWW03F9"     # Custom ElevenLabs voice
+tts_backend = "openai_tts"                   # OpenAI TTS (fable = British accent)
+tts_voice_id = "fable"                       # OpenAI voice: alloy, echo, fable, onyx, nova, shimmer
 tts_speed = 1.0
 tts_language = "en"
 
@@ -105,8 +105,8 @@ timezone = "America/Chicago"                 # Nashville, TN = Central Time
 persona = "eris"                             # Custom persona
 honorific = "Eris"                           # Use first name, not "sir"
 voice_speed = 1.0
-tts_backend = "elevenlabs"
-voice_id = "onwK4e9ZLuTAKqWW03F9"
+tts_backend = "openai_tts"
+voice_id = "fable"
 sections = ["messages", "calendar", "health", "world", "social", "music"]
 
 [digest.schedules]

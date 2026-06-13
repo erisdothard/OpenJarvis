@@ -575,6 +575,8 @@ class IntelligenceConfig:
     top_k: int = 40
     repetition_penalty: float = 1.0
     stop_sequences: str = ""  # Comma-separated stop strings
+    fast_model: str = ""  # Cheaper model for trivial/simple queries
+    smart_routing_enabled: bool = True  # Enable automatic model downrouting
 
 
 @dataclass(slots=True)
@@ -896,9 +898,9 @@ class StorageConfig:
 
     default_backend: str = "sqlite"
     db_path: str = str(DEFAULT_CONFIG_DIR / "memory.db")
-    context_top_k: int = 5
-    context_min_score: float = 0.0
-    context_max_tokens: int = 2048
+    context_top_k: int = 3        # 3 high-quality chunks > 5 mediocre
+    context_min_score: float = 1.0  # filter near-noise BM25 results
+    context_max_tokens: int = 1024  # halved for meaningful token savings
     chunk_size: int = 512
     chunk_overlap: int = 64
 
@@ -946,10 +948,10 @@ class AgentConfig:
     system_prompt: str = ""  # inline system prompt (takes precedence if set)
     system_prompt_path: str = ""  # path to system prompt file (.txt, .md)
     context_from_memory: bool = True  # inject relevant memory context into prompts
+    batch_mode: str = "auto"  # "auto" | "always" | "never" — Anthropic Batch API usage
     default_system_prompt: str = (
-        "You are a helpful AI assistant running locally on the user's own "
-        "hardware through OpenJarvis. You are not a cloud service. Respond "
-        "helpfully, concisely, and accurately."
+        "You are a helpful AI assistant powered by OpenJarvis. "
+        "Respond helpfully, concisely, and accurately."
     )
 
     # Backward-compat property for old field name
@@ -1066,6 +1068,17 @@ class ProactiveConfig:
     # Channel to send approval notifications and receive yes/no replies.
     # Format: "{type}:{id}", e.g. "imessage:+15551234567" or "telegram:123456789"
     notification_channel: str = ""
+
+
+@dataclass(slots=True)
+class CheckinConfig:
+    """Daily check-in — Jarvis texts asking for updates, routes replies."""
+
+    enabled: bool = False
+    schedule: str = "0 16 * * *"  # cron expression (default: 4pm daily)
+    timezone: str = "America/Chicago"
+    phone: str = "+16152439891"  # iMessage recipient (E.164)
+    reply_timeout_minutes: int = 60  # how long to wait for a reply
 
 
 @dataclass(slots=True)
@@ -1462,6 +1475,7 @@ class SystemPromptConfig:
     user_max_chars: int = 1500
     skill_desc_max_chars: int = 60
     truncation_strategy: str = "head_tail"
+    max_history_tokens: int = 32_000
 
 
 @dataclass(slots=True)
@@ -1577,6 +1591,7 @@ class JarvisConfig:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     digest: DigestConfig = field(default_factory=DigestConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
+    checkin: CheckinConfig = field(default_factory=CheckinConfig)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
     mining: Optional["MiningConfig"] = None
 
@@ -1835,6 +1850,7 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
             "agent_manager",
             "digest",
             "proactive",
+            "checkin",
             "alerts",
             "memory_files",
             "system_prompt",

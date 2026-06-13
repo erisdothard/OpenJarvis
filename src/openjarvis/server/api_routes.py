@@ -831,9 +831,6 @@ async def synthesize_speech(request: Request):
 
     if backend_name not in tts_cache:
         try:
-            import openjarvis.speech.cartesia_tts  # noqa: F401
-            import openjarvis.speech.elevenlabs_tts  # noqa: F401
-            import openjarvis.speech.kokoro_tts  # noqa: F401
             import openjarvis.speech.openai_tts  # noqa: F401
         except ImportError:
             pass
@@ -850,8 +847,10 @@ async def synthesize_speech(request: Request):
             raise HTTPException(status_code=500, detail=f"TTS backend init failed: {e}")
 
     # Ordered fallback chain: try primary, then fall back to alternatives
-    _TTS_FALLBACK_ORDER = ["elevenlabs", "cartesia", "openai_tts"]
+    _TTS_FALLBACK_ORDER = ["openai_tts"]
     backends_to_try = [backend_name] + [b for b in _TTS_FALLBACK_ORDER if b != backend_name]
+
+    import asyncio
 
     last_error = None
     result = None
@@ -865,9 +864,12 @@ async def synthesize_speech(request: Request):
                 continue
         try:
             _kwargs = {"speed": speed}
-            if try_name == backend_name and voice_id:
+            if voice_id:
                 _kwargs["voice_id"] = voice_id
-            result = tts_cache[try_name].synthesize(text, **_kwargs)
+            # Run synchronous TTS in a thread so it doesn't block the event loop
+            result = await asyncio.to_thread(
+                tts_cache[try_name].synthesize, text, **_kwargs,
+            )
             if try_name != backend_name:
                 logger.warning("TTS: %s failed, fell back to %s", backend_name, try_name)
             break

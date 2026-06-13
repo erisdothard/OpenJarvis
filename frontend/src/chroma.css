@@ -1,9 +1,9 @@
 /*
- * OpenJarvis — Chromatic Liquid Metal Effects
- * Iridescent spectral edges. Mirror reflections. Dispersion glow.
+ * OpenJarvis — Platinum Edge Effects
+ * Silver-chrome edges. Teal accent glow. No rainbow.
  */
 
-/* ── Chromatic Keyframes ── */
+/* ── Keyframes ── */
 @keyframes chroma-border-travel {
   0%   { background-position: 0% center; }
   100% { background-position: 200% center; }
@@ -19,7 +19,7 @@
   100% { left: 200%; }
 }
 
-/* ── Chromatic Border Mixin (via class) ── */
+/* ── Platinum Edge Mixin (via class) ── */
 .chroma-edge {
   position: relative;
 }
@@ -31,14 +31,13 @@
   padding: 1px;
   background: linear-gradient(
     90deg,
-    rgba(255, 0, 128, 0.0) 0%,
-    rgba(255, 0, 128, 0.15) 10%,
-    rgba(255, 109, 0, 0.2) 20%,
-    rgba(255, 234, 0, 0.2) 35%,
-    rgba(0, 255, 135, 0.2) 50%,
-    rgba(0, 229, 255, 0.25) 65%,
-    rgba(140, 0, 255, 0.15) 80%,
-    rgba(255, 0, 128, 0.0) 100%
+    rgba(106, 108, 120, 0.0) 0%,
+    rgba(156, 160, 180, 0.15) 15%,
+    rgba(216, 218, 228, 0.25) 35%,
+    rgba(61, 242, 221, 0.2) 50%,
+    rgba(216, 218, 228, 0.25) 65%,
+    rgba(156, 160, 180, 0.15) 85%,
+    rgba(106, 108, 120, 0.0) 100%
   );
   background-size: 200% 100%;
   -webkit-mask:
@@ -55,7 +54,7 @@
   opacity: 1;
 }
 
-/* ── Persistent (always-visible) chromatic edge ── */
+/* ── Persistent (always-visible) edge ── */
 .chroma-edge-always::before {
   opacity: 0.5;
 }
@@ -90,8 +89,8 @@
   background: linear-gradient(
     135deg,
     rgba(0, 229, 255, 0.12) 0%,
-    rgba(140, 0, 255, 0.08) 50%,
-    rgba(255, 0, 128, 0.06) 100%
+    rgba(156, 160, 180, 0.08) 50%,
+    rgba(61, 242, 221, 0.06) 100%
   );
   -webkit-mask:
     linear-gradient(#fff 0 0) content-box,
@@ -101,9 +100,9 @@
   pointer-events: none;
 }
 
-/* ── Send button — chromatic gradient ── */
+/* ── Send button — teal gradient ── */
 .chroma-button-primary {
-  background: linear-gradient(135deg, #00e5ff, #00ff87, #00e5ff) !important;
+  background: linear-gradient(135deg, #00e5ff, #3df2dd, #00e5ff) !important;
   background-size: 200% 200% !important;
   color: #000000 !important;
   font-weight: 600;
@@ -115,7 +114,7 @@
   background-position: 100% 100% !important;
   transform: scale(1.04);
   box-shadow: 0 0 20px -4px rgba(0, 229, 255, 0.3),
-              0 0 40px -8px rgba(0, 255, 135, 0.15);
+              0 0 40px -8px rgba(61, 242, 221, 0.15);
 }
 .chroma-button-primary:active { transform: scale(0.97); }
 
@@ -149,9 +148,9 @@
   width: 2px; border-radius: 0 999px 999px 0;
   background: linear-gradient(
     180deg,
-    var(--chroma-cyan),
-    var(--chroma-green),
-    var(--chroma-cyan)
+    #3df2dd,
+    #00bcd4,
+    #3df2dd
   );
 }
 
@@ -172,7 +171,7 @@
   border-bottom: 1px solid var(--color-border);
 }
 
-/* ── Input focus ring — chromatic ── */
+/* ── Input focus ring — teal ── */
 .chroma-border { position: relative; }
 .chroma-border:focus-within {
   box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.12),
@@ -180,13 +179,13 @@
   border-color: rgba(0, 229, 255, 0.15) !important;
 }
 
-/* ── Ambient BG — very subtle radial glows ── */
+/* ── Ambient BG — subtle radial glows ── */
 .chroma-bg {
   position: fixed; inset: 0; z-index: 0; pointer-events: none;
   background:
     radial-gradient(ellipse 60% 40% at 15% 10%, rgba(0, 229, 255, 0.015) 0%, transparent 60%),
-    radial-gradient(ellipse 50% 50% at 85% 90%, rgba(140, 0, 255, 0.01) 0%, transparent 60%),
-    radial-gradient(ellipse 40% 30% at 50% 50%, rgba(255, 0, 128, 0.005) 0%, transparent 60%);
+    radial-gradient(ellipse 50% 50% at 85% 90%, rgba(61, 242, 221, 0.01) 0%, transparent 60%),
+    radial-gradient(ellipse 40% 30% at 50% 50%, rgba(156, 160, 180, 0.005) 0%, transparent 60%);
 }
 
 .chroma-text { color: var(--color-accent); }
@@ -196,7 +195,7 @@
 /* ── Prose headings — clean ── */
 .prose h1, .prose h2, .prose h3 { text-shadow: none; }
 
-/* ── Chromatic card hover effect ── */
+/* ── Platinum card hover effect ── */
 .chroma-card {
   position: relative;
   background: rgba(255, 255, 255, 0.01);
@@ -205,7 +204,6 @@
   overflow: hidden;
   transition: border-color 400ms ease, background 400ms ease;
 }
-/* Chromatic edge shimmer on hover */
 .chroma-card::before {
   content: '';
   position: absolute;
@@ -214,11 +212,11 @@
   padding: 1px;
   background: linear-gradient(
     135deg,
-    rgba(0, 229, 255, 0.2) 0%,
-    rgba(0, 255, 135, 0.15) 25%,
-    rgba(255, 234, 0, 0.1) 50%,
-    rgba(255, 0, 128, 0.15) 75%,
-    rgba(140, 0, 255, 0.2) 100%
+    rgba(106, 108, 120, 0.15) 0%,
+    rgba(216, 218, 228, 0.2) 25%,
+    rgba(0, 229, 255, 0.15) 50%,
+    rgba(216, 218, 228, 0.2) 75%,
+    rgba(106, 108, 120, 0.15) 100%
   );
   background-size: 200% 200%;
   -webkit-mask:
@@ -240,7 +238,7 @@
     135deg,
     rgba(0, 229, 255, 0.015) 0%,
     transparent 50%,
-    rgba(140, 0, 255, 0.01) 100%
+    rgba(61, 242, 221, 0.01) 100%
   );
   transition: opacity 400ms ease;
   pointer-events: none;
@@ -253,6 +251,69 @@
   opacity: 1;
 }
 .chroma-card:hover::after {
+  opacity: 1;
+}
+
+/* ── Void card (platinum edge on hover) ── */
+.chromatic-void-card {
+  position: relative;
+  background: var(--color-bg-secondary);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 16px;
+  padding: 24px;
+  overflow: hidden;
+  transition: border-color 400ms ease, background 400ms ease;
+}
+.chromatic-void-card::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    135deg,
+    rgba(106, 108, 120, 0.0) 0%,
+    rgba(156, 160, 180, 0.2) 20%,
+    rgba(216, 218, 228, 0.25) 40%,
+    rgba(0, 229, 255, 0.2) 60%,
+    rgba(216, 218, 228, 0.25) 80%,
+    rgba(106, 108, 120, 0.0) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity 400ms cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+  z-index: 10;
+}
+.chromatic-void-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: calc(16px - 1px);
+  background: radial-gradient(
+    ellipse 80% 60% at 50% 30%,
+    rgba(0, 229, 255, 0.05) 0%,
+    rgba(61, 242, 221, 0.02) 40%,
+    transparent 100%
+  );
+  opacity: 0;
+  transition: opacity 400ms ease;
+  pointer-events: none;
+}
+.chromatic-void-card:hover {
+  background: rgba(0, 229, 255, 0.01);
+  border-color: rgba(0, 229, 255, 0.05);
+}
+.chromatic-void-card:hover::before {
+  opacity: 1;
+  animation: chroma-border-travel 3s linear infinite;
+}
+.chromatic-void-card:hover::after {
   opacity: 1;
 }
 
@@ -279,9 +340,9 @@
   background: linear-gradient(
     90deg,
     rgba(0, 229, 255, 0.0) 0%,
-    rgba(0, 229, 255, 0.2) 25%,
-    rgba(0, 255, 135, 0.15) 50%,
-    rgba(140, 0, 255, 0.15) 75%,
+    rgba(156, 160, 180, 0.15) 20%,
+    rgba(0, 229, 255, 0.2) 50%,
+    rgba(156, 160, 180, 0.15) 80%,
     rgba(0, 229, 255, 0.0) 100%
   );
   background-size: 200% 100%;
@@ -452,4 +513,5 @@
   .chroma-edge::before { animation: none; }
   .more-sheet { transition: none; }
   .mobile-bottom-bar::before { animation: none; }
+  .chromatic-void-card::before { animation: none; opacity: 0.5; }
 }

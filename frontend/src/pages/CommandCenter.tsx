@@ -10,19 +10,20 @@ import {
   approveAction,
   denyAction,
   synthesizeSpeech,
-
 } from '../lib/api';
 import { listConnectors } from '../lib/connectors-api';
 import { streamChat, streamResearch } from '../lib/sse';
 import { useBriefing } from '../hooks/useBriefing';
-import { useSpeech } from '../hooks/useSpeech';
-import { useAlwaysOnVoice } from '../hooks/useAlwaysOnVoice';
 import { useVoiceStream } from '../hooks/useVoiceStream';
+import { useAudioManager } from '../hooks/useAudioManager';
+import type { AudioManagerReturn } from '../hooks/useAudioManager';
+import { extractSentence, cleanForTTS } from '../lib/sentenceBuffer';
 import { JarvisOrb } from '../components/JarvisOrb/JarvisOrb';
 import { SituationalPanel } from '../components/CommandCenter/SituationalPanel';
 import { TelemetryStrip } from '../components/CommandCenter/TelemetryStrip';
 import { SocialPanel } from '../components/CommandCenter/SocialPanel';
 import type { ManagedAgent, PendingApproval } from '../lib/api';
+import { useIsMobile } from '../hooks/useIsMobile';
 import type {
   ChatMessage,
   MessageTelemetry,
@@ -72,7 +73,6 @@ export function CommandCenter() {
   const isStreaming = useAppStore((s) => s.streamState.isStreaming);
   const streamState = useAppStore((s) => s.streamState);
   const briefing = useAppStore((s) => s.briefing);
-  // savings is read by TelemetryStrip from the store directly
   const messages = useAppStore((s) => s.messages);
   const activeId = useAppStore((s) => s.activeId);
   const selectedModel = useAppStore((s) => s.selectedModel);
@@ -96,30 +96,45 @@ export function CommandCenter() {
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [processing, setProcessing] = useState<Record<string, boolean>>({});
 
+  const isMobile = useIsMobile(640);
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [input, setInput] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastResponseRef = useRef('');
-
-  // Audio refs for TTS
-  const audioQueueRef = useRef<HTMLAudioElement[]>([]);
-  const playingRef = useRef(false);
   const sentenceBufferRef = useRef('');
-  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
-  const startRecordingRef = useRef<(() => Promise<void>) | undefined>(undefined);
-  const interruptAudioRef = useRef<() => void>(() => {});
-  const stopBargeInRef = useRef<() => void>(() => {});
-  const startBargeInRef = useRef<(cb: () => void) => void>(() => {});
   const voiceInitiatedRef = useRef(false);
   const pendingVoiceRef = useRef(false);
 
-  // ── WebSocket voice stream (replaces useSpeech + TTS when server VAD available) ──
+  // Refs to break the circular dependency between audioManager and voiceStream:
+  // audioManager callbacks need voiceStream state, voiceStream callbacks need audioManager functions.
+  const audioManagerRef = useRef<AudioManagerReturn>(null!);
+  const wsActiveRef = useRef(false);
+
+  // ── Audio manager (single source of truth for all playback) ──
+  const audioManager = useAudioManager({
+    onPlaybackStart: () => {
+      if (!wsActiveRef.current) setJarvisState('speaking');
+    },
+    onPlaybackFinished: () => {
+      if (!wsActiveRef.current && !useAppStore.getState().streamState.isStreaming) {
+        setJarvisState('idle');
+      }
+    },
+  });
+  audioManagerRef.current = audioManager;
+
+  // Push AudioManager output level to the store for orb reactivity
+  useEffect(() => {
+    if (audioManager.isPlaying) setAudioLevel(audioManager.outputLevel);
+  }, [audioManager.outputLevel, audioManager.isPlaying, setAudioLevel]);
+
+  // ── WebSocket voice stream ──
   const voiceConvRef = useRef<string | null>(null);
   const voiceContentRef = useRef('');
   const voiceToolsRef = useRef<ToolCallInfo[]>([]);
-  const wsAutoRef = useRef(false); // true when auto-connected via always-on
+  const wsAutoRef = useRef(false);
 
   const voiceStream = useVoiceStream({
     onTranscript: useCallback((text: string, isFinal: boolean) => {
@@ -131,7 +146,6 @@ export function CommandCenter() {
       voiceConvRef.current = convId;
       voiceContentRef.current = '';
       voiceToolsRef.current = [];
-
       store.addMessage(convId, { id: generateId(), role: 'user', content: text.trim(), timestamp: Date.now() });
       store.addMessage(convId, { id: generateId(), role: 'assistant', content: '', timestamp: Date.now() });
       store.setStreamState({ isStreaming: true, phase: 'Generating...', elapsedMs: 0, activeToolCalls: [], content: '' });
@@ -163,6 +177,12 @@ export function CommandCenter() {
     onAudioLevel: useCallback((level: number) => {
       useAppStore.getState().setAudioLevel(level);
     }, []),
+    onAudioData: useCallback((pcm: ArrayBuffer) => {
+      audioManagerRef.current.enqueuePCM(pcm);
+    }, []),
+    onStopPlayback: useCallback(() => {
+      audioManagerRef.current.interruptAll();
+    }, []),
     onToolStart: useCallback((tool: string, args: string) => {
       const tc: ToolCallInfo = { id: generateId(), tool, arguments: args, status: 'running' };
       voiceToolsRef.current.push(tc);
@@ -187,6 +207,7 @@ export function CommandCenter() {
   });
 
   const wsVoiceActive = voiceStream.state !== 'disconnected';
+  wsActiveRef.current = wsVoiceActive;
 
   // Auto-connect WS voice when always-on is enabled and server supports it
   useEffect(() => {
@@ -201,9 +222,8 @@ export function CommandCenter() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voiceStream.available, speechEnabled, voiceAlwaysOn, selectedModel]);
 
-  const { interrupt: interruptBriefing, refresh: refreshBriefing, play: playBriefing } = useBriefing();
-  // Alias interrupt from useBriefing to avoid clash with voiceStream.interrupt
-  const interrupt = interruptBriefing;
+  // ── Briefing (uses shared AudioManager) ──
+  const { interrupt: interruptBriefing, refresh: refreshBriefing, play: playBriefing } = useBriefing(audioManager);
 
   // ── Data polling ──
   const refresh = useCallback(async () => {
@@ -235,192 +255,25 @@ export function CommandCenter() {
     finally { setProcessing((p) => ({ ...p, [id]: false })); }
   };
 
-  // Audio output level analysis ref
-  const ttsAnalyserRef = useRef<{ ctx: AudioContext; analyser: AnalyserNode; raf: number } | null>(null);
-
-  const stopTTSAnalyser = useCallback(() => {
-    if (ttsAnalyserRef.current) {
-      cancelAnimationFrame(ttsAnalyserRef.current.raf);
-      ttsAnalyserRef.current.ctx.close().catch(() => {});
-      ttsAnalyserRef.current = null;
-    }
-  }, []);
-
-  // ── TTS plumbing ──
-  const playNextAudio = useCallback(() => {
-    if (audioQueueRef.current.length === 0) {
-      playingRef.current = false;
-      currentAudioRef.current = null;
-      stopTTSAnalyser();
-      setAudioLevel(0);
-      stopBargeInRef.current();
-      voiceInitiatedRef.current = false;
-      // Only reset to idle when streaming is ALSO done — otherwise stay
-      // in 'thinking' so the orb/status doesn't flicker between TTS sentences.
-      const stillStreaming = useAppStore.getState().streamState.isStreaming;
-      if (!stillStreaming) {
-        setJarvisState('idle');
-      }
+  // ── Mic click ──
+  const handleMicClick = useCallback(async () => {
+    if (!voiceStream.available) {
+      toast.error('Voice backend not available — server needs VAD + STT');
       return;
     }
-    playingRef.current = true;
-    setJarvisState('speaking');
-    const audio = audioQueueRef.current.shift()!;
-    currentAudioRef.current = audio;
-    audio.onended = () => {
-      URL.revokeObjectURL(audio.src);
-      currentAudioRef.current = null;
-      stopTTSAnalyser();
-      playNextAudio();
-    };
-    audio.play().then(() => {
-      // Extract audio levels from TTS output for orb reactivity
-      try {
-        const ctx = new AudioContext();
-        const source = ctx.createMediaElementSource(audio);
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 256;
-        source.connect(analyser);
-        analyser.connect(ctx.destination);
-        const data = new Uint8Array(analyser.frequencyBinCount);
-        const tick = () => {
-          if (!playingRef.current) return;
-          analyser.getByteFrequencyData(data);
-          const rms = Math.sqrt(data.reduce((s, v) => s + v * v, 0) / data.length);
-          setAudioLevel(Math.min(rms / 80, 1));
-          ttsAnalyserRef.current = { ctx, analyser, raf: requestAnimationFrame(tick) };
-        };
-        ttsAnalyserRef.current = { ctx, analyser, raf: requestAnimationFrame(tick) };
-      } catch {
-        // AudioContext not available — orb won't react to output, but TTS still plays
-      }
-    }).catch(() => playNextAudio());
-    if (!voiceAlwaysOn) {
-      startBargeInRef.current(() => {
-        interruptAudioRef.current();
+    if (wsVoiceActive) {
+      voiceStream.disconnect();
+      wsAutoRef.current = false;
+    } else {
+      wsAutoRef.current = false;
+      audioManager.interruptAll();
+      await voiceStream.connect({ model: selectedModel }).catch(() => {
+        toast.error('Voice connection failed');
       });
     }
-  }, [voiceAlwaysOn, setJarvisState, setAudioLevel, stopTTSAnalyser]);
+  }, [voiceStream, wsVoiceActive, selectedModel, audioManager]);
 
-  const interruptAudio = useCallback(() => {
-    stopBargeInRef.current();
-    stopTTSAnalyser();
-    if (currentAudioRef.current) { currentAudioRef.current.pause(); URL.revokeObjectURL(currentAudioRef.current.src); currentAudioRef.current = null; }
-    for (const a of audioQueueRef.current) URL.revokeObjectURL(a.src);
-    audioQueueRef.current = [];
-    playingRef.current = false;
-    setAudioLevel(0);
-  }, [stopTTSAnalyser, setAudioLevel]);
-  interruptAudioRef.current = interruptAudio;
-
-  const queueSentenceTTS = useCallback((sentence: string) => {
-    // Skip client-side TTS when WebSocket voice pipeline handles audio server-side
-    if (wsVoiceActive) return;
-    const clean = sentence.replace(/```[\s\S]*?```/g, 'code block omitted').replace(/[#*_~`>\[\]]/g, '').replace(/\n+/g, ' ').trim();
-    if (!clean) return;
-    synthesizeSpeech(clean).then((blob) => {
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      audioQueueRef.current.push(audio);
-      if (!playingRef.current) playNextAudio();
-    }).catch(() => {});
-  }, [wsVoiceActive, playNextAudio]);
-
-  // ── Voice ──
-  const handleVoiceTranscribed = useCallback((text: string) => {
-    const clean = text?.trim();
-    if (clean && clean.length > 1) { setInput(clean); pendingVoiceRef.current = true; }
-  }, []);
-
-  const { state: speechState, error: speechError, available: speechAvailable, startRecording, stopRecording, startBargeInMonitor, stopBargeInMonitor } = useSpeech({
-    onTranscribed: handleVoiceTranscribed,
-  });
-  startRecordingRef.current = startRecording;
-  stopBargeInRef.current = stopBargeInMonitor;
-  startBargeInRef.current = startBargeInMonitor;
-
-  // Show speech errors as toasts
-  useEffect(() => {
-    if (speechError) toast.error(speechError);
-  }, [speechError]);
-
-  // ── Always-on voice ──
-  const sendMessageRef = useRef<(text?: string) => Promise<void>>(undefined);
-  // Will be set after sendMessage is defined — for now set in an effect below
-
-  // Use old always-on only when WS voice stream is not available
-  const alwaysOnEnabled = speechEnabled && voiceAlwaysOn && !voiceStream.available;
-
-  const handleAlwaysOnTranscribed = useCallback((text: string) => {
-    if (text && sendMessageRef.current) {
-      voiceInitiatedRef.current = true;
-      sendMessageRef.current(text);
-    }
-  }, []);
-
-  const handleAlwaysOnBargeIn = useCallback(() => {
-    interruptAudio();
-  }, [interruptAudio]);
-
-  const handleAlwaysOnAudioLevel = useCallback((rms: number) => {
-    // Only update from mic input when Jarvis isn't speaking (TTS analyser handles that)
-    if (!playingRef.current) setAudioLevel(rms);
-  }, [setAudioLevel]);
-
-  const handleAlwaysOnStateChange = useCallback((s: 'idle' | 'monitoring' | 'capturing' | 'transcribing') => {
-    if (playingRef.current) return; // don't override 'speaking' state
-    // Don't override 'thinking' state while model is generating
-    if (useAppStore.getState().streamState.isStreaming) return;
-    if (s === 'monitoring') setJarvisState('listening');
-    else if (s === 'capturing') setJarvisState('listening');
-    else if (s === 'transcribing') setJarvisState('thinking');
-    else setJarvisState('idle');
-  }, [setJarvisState]);
-
-  useAlwaysOnVoice({
-    enabled: alwaysOnEnabled,
-    jarvisSpeaking: jarvisState === 'speaking',
-    onTranscribed: handleAlwaysOnTranscribed,
-    onBargeIn: handleAlwaysOnBargeIn,
-    onAudioLevel: handleAlwaysOnAudioLevel,
-    onStateChange: handleAlwaysOnStateChange,
-  });
-
-  const handleMicClick = useCallback(async () => {
-    // Prefer WebSocket voice when server supports it
-    if (voiceStream.available) {
-      if (wsVoiceActive) {
-        voiceStream.disconnect();
-        wsAutoRef.current = false;
-      } else {
-        wsAutoRef.current = false;
-        interruptAudio();
-        await voiceStream.connect({ model: selectedModel }).catch(() => {
-          toast.error('Voice connection failed');
-        });
-      }
-      return;
-    }
-    // Fallback to old useSpeech path
-    if (!speechAvailable) {
-      toast.error('Speech backend not available — check server config');
-      return;
-    }
-    interruptAudio();
-    if (speechState === 'recording') {
-      try {
-        const text = await stopRecording();
-        if (text && text.trim()) { setInput(text); pendingVoiceRef.current = true; }
-      } catch {
-        toast.error('Transcription failed');
-      }
-    } else {
-      voiceInitiatedRef.current = true;
-      await startRecording();
-    }
-  }, [voiceStream, wsVoiceActive, selectedModel, speechState, speechAvailable, startRecording, stopRecording, interruptAudio]);
-
-  // ── Streaming ──
+  // ── Streaming (text input) ──
   const stopStreaming = useCallback(() => {
     abortRef.current?.abort();
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
@@ -434,7 +287,6 @@ export function CommandCenter() {
 
     setInput('');
     sentenceBufferRef.current = '';
-    audioQueueRef.current = [];
 
     let convId = activeId;
     if (!convId) convId = createConversation(selectedModel);
@@ -463,6 +315,8 @@ export function CommandCenter() {
 
     setStreamState({ isStreaming: true, phase: 'Generating...', elapsedMs: 0, activeToolCalls: [], content: '' });
     setJarvisState('thinking');
+
+    const ttsGen = audioManager.getGeneration();
 
     try {
       for await (const sseEvent of streamChat(
@@ -501,13 +355,18 @@ export function CommandCenter() {
               accumulatedContent += delta.content;
               setStreamState({ content: accumulatedContent, phase: '' });
 
+              // Sentence-level TTS for text-initiated chats
               if (speechEnabled) {
                 sentenceBufferRef.current += delta.content;
-                const sentenceMatch = sentenceBufferRef.current.match(/^([\s\S]*?[.!?])\s+([\s\S]*)$/);
-                if (sentenceMatch) {
-                  const completeSentence = sentenceMatch[1].trim();
-                  sentenceBufferRef.current = sentenceMatch[2];
-                  if (completeSentence) queueSentenceTTS(completeSentence);
+                const result = extractSentence(sentenceBufferRef.current);
+                if (result) {
+                  sentenceBufferRef.current = result.remainder;
+                  const clean = cleanForTTS(result.sentence);
+                  if (clean) {
+                    synthesizeSpeech(clean).then((blob) => {
+                      audioManager.enqueueBlob(URL.createObjectURL(blob), ttsGen);
+                    }).catch((err) => console.warn('[TTS] Stream sentence failed:', err?.message || err));
+                  }
                 }
               }
 
@@ -541,19 +400,23 @@ export function CommandCenter() {
       if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
       resetStream();
       abortRef.current = null;
-      if (speechEnabled && sentenceBufferRef.current.trim()) { queueSentenceTTS(sentenceBufferRef.current); sentenceBufferRef.current = ''; }
-      // Only go idle if TTS isn't playing — playNextAudio handles the
-      // final state transition when all audio finishes.
-      if (!playingRef.current) setJarvisState('idle');
+
+      if (speechEnabled && sentenceBufferRef.current.trim()) {
+        const clean = cleanForTTS(sentenceBufferRef.current);
+        if (clean) {
+          synthesizeSpeech(clean).then((blob) => {
+            audioManager.enqueueBlob(URL.createObjectURL(blob), ttsGen);
+          }).catch((err) => console.warn('[TTS] Final sentence failed:', err?.message || err));
+        }
+        sentenceBufferRef.current = '';
+      }
+
+      if (!audioManager.isPlaying) setJarvisState('idle');
       voiceInitiatedRef.current = false;
       fetchSavings().then((data) => useAppStore.getState().setSavings(data)).catch(() => {});
     }
-  }, [input, activeId, selectedModel, streamState.isStreaming, createConversation, addMessage, updateLastAssistant, setStreamState, resetStream, temperature, maxTokens, speechEnabled, voiceAlwaysOn, queueSentenceTTS, setJarvisState]);
+  }, [input, activeId, selectedModel, streamState.isStreaming, createConversation, addMessage, updateLastAssistant, setStreamState, resetStream, temperature, maxTokens, speechEnabled, wsVoiceActive, audioManager, setJarvisState]);
 
-  // Keep sendMessageRef current for always-on voice callback
-  sendMessageRef.current = sendMessage;
-
-  // Auto-send after voice transcription (manual mic mode)
   useEffect(() => {
     if (pendingVoiceRef.current && input.trim()) {
       pendingVoiceRef.current = false;
@@ -562,7 +425,6 @@ export function CommandCenter() {
     }
   }, [input, sendMessage]);
 
-  // Track last response so we can show a brief snippet on the ball
   useEffect(() => {
     if (!streamState.isStreaming && messages.length > 0) {
       const last = messages[messages.length - 1];
@@ -578,7 +440,8 @@ export function CommandCenter() {
 
   // ── Derived state ──
   const runningAgents = agents.filter((a) => a.status === 'running');
-  const alwaysOnUI = (speechEnabled && voiceAlwaysOn); // for display regardless of WS vs old
+  const alwaysOnUI = speechEnabled && voiceAlwaysOn;
+  const alwaysOnFunctional = alwaysOnUI && voiceStream.available !== false;
   const voiceStatusLabel = alwaysOnUI
     ? jarvisState === 'speaking' ? 'SPEAKING'
     : jarvisState === 'listening' ? 'LISTENING'
@@ -594,18 +457,12 @@ export function CommandCenter() {
     : `${runningAgents.length > 0 ? `${runningAgents.length} running` : 'idle'} · memory warm · ${agents.length} agents scheduled`;
   const modelLabel = selectedModel || serverInfo?.model || 'no model';
   const engineLabel = serverInfo?.engine || 'local';
-
-  // Telemetry data
   const latencyMs = streamState.isStreaming ? streamState.elapsedMs : 0;
 
   return (
     <div className="h-full overflow-y-auto relative" style={{ background: '#030305', color: '#eef0f4', fontFamily: "'Geist Variable', 'Geist', system-ui, sans-serif" }}>
-      {/* Atmosphere */}
       <div className="pt-atmosphere" />
-
-      {/* Frame */}
       <div className="pt-frame">
-        {/* Top bar */}
         <div className="pt-topbar">
           <span className="pt-heartbeat" />
           <span className="pt-hud">openjarvis // {engineLabel} // {modelLabel}</span>
@@ -619,26 +476,18 @@ export function CommandCenter() {
           </button>
         </div>
 
-        {/* Grid */}
         <div className="pt-grid">
-          {/* ── Core Stage — always hero, conversations save to /chat ── */}
           <div className={`pt-panel pt-core-stage pt-active ${isStreaming ? 'pt-streaming' : ''}`}>
-            <JarvisOrb
-              state={jarvisState}
-              audioLevel={audioLevel}
-              alwaysOnActive={alwaysOnEnabled}
-            />
+            <JarvisOrb state={jarvisState} audioLevel={audioLevel} alwaysOnActive={alwaysOnFunctional} />
             <h1 className="pt-display pt-aberrate" data-text={statusLabel}>{statusLabel}</h1>
             <div className="pt-hud pt-statusline">{statusSub}</div>
 
-            {/* Input bar — always visible */}
             <div className="pt-inputbar" onClick={() => inputRef.current?.focus()}>
-              {/* Always-on toggle */}
               <button
-                className={`pt-always-on ${alwaysOnEnabled ? 'pt-active' : ''}`}
+                className={`pt-always-on ${alwaysOnFunctional ? 'pt-active' : ''}`}
                 onClick={(e) => { e.stopPropagation(); updateSettings({ voiceAlwaysOn: !voiceAlwaysOn }); }}
-                disabled={!speechEnabled}
-                title={alwaysOnEnabled ? 'Disable always-on listening' : 'Enable always-on listening'}
+                disabled={!speechEnabled || voiceStream.available === false}
+                title={alwaysOnFunctional ? 'Disable always-on listening' : voiceStream.available === false ? 'Voice backend not available' : 'Enable always-on listening'}
               >
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                   <circle cx="8" cy="8" r="3" stroke="currentColor" strokeWidth="1.5" />
@@ -646,13 +495,12 @@ export function CommandCenter() {
                   <path d="M12 4c1.1 1.1 1.8 2.5 1.8 4s-.7 2.9-1.8 4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
                 </svg>
               </button>
-              {/* Manual mic button — hidden when always-on is active */}
               {!alwaysOnUI && (
                 <button
-                  className={`pt-mic ${(wsVoiceActive || speechState === 'recording') ? 'pt-recording' : ''}`}
+                  className={`pt-mic ${wsVoiceActive ? 'pt-recording' : ''}`}
                   onClick={(e) => { e.stopPropagation(); handleMicClick(); }}
                   disabled={!speechEnabled || streamState.isStreaming}
-                  title={wsVoiceActive ? 'Disconnect voice' : speechState === 'recording' ? 'Stop recording' : 'Start recording'}
+                  title={wsVoiceActive ? 'Disconnect voice' : 'Start voice'}
                 >
                   ●
                 </button>
@@ -663,7 +511,7 @@ export function CommandCenter() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder={selectedModel ? 'Speak or type a command...' : 'Select a model first (⌘K)...'}
+                placeholder={selectedModel ? (isMobile ? 'Command...' : 'Speak or type a command...') : (isMobile ? 'Select model...' : 'Select a model first (⌘K)...')}
                 disabled={streamState.isStreaming}
               />
               {streamState.isStreaming ? (
@@ -673,27 +521,18 @@ export function CommandCenter() {
               ) : (
                 <>
                   {input.trim() ? (
-                    <button
-                      className="pt-send"
-                      onClick={() => sendMessage()}
-                      disabled={!input.trim() || !selectedModel}
-                      title="Send"
-                    >
+                    <button className="pt-send" onClick={() => sendMessage()} disabled={!input.trim() || !selectedModel} title="Send">
                       <Send size={16} />
                     </button>
                   ) : (
-                    <span className="pt-wave" aria-hidden="true">
-                      <span /><span /><span /><span /><span />
-                    </span>
+                    <span className="pt-wave" aria-hidden="true"><span /><span /><span /><span /><span /></span>
                   )}
                 </>
               )}
             </div>
           </div>
 
-          {/* ── Rail ── */}
           <div className="pt-rail">
-            {/* Daily Briefing */}
             {briefing.status !== 'idle' && (
               <div className="pt-panel pt-card">
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
@@ -705,7 +544,7 @@ export function CommandCenter() {
                   </h3>
                   <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                     {briefing.status === 'speaking' ? (
-                      <button className="pt-briefing-ctrl pt-stop-ctrl" onClick={interrupt}><VolumeX size={10} /> Stop</button>
+                      <button className="pt-briefing-ctrl pt-stop-ctrl" onClick={interruptBriefing}><VolumeX size={10} /> Stop</button>
                     ) : briefing.text && briefing.status === 'ready' ? (
                       <button className="pt-briefing-ctrl" onClick={playBriefing} style={{ color: '#3df2dd' }}><Play size={10} /> Play</button>
                     ) : null}
@@ -728,9 +567,7 @@ export function CommandCenter() {
                 {briefing.text && (
                   <div style={{ position: 'relative' }}>
                     {briefing.status === 'speaking' && <div className="pt-briefing-live-bar" />}
-                    <p className="pt-briefing-body" style={{ paddingLeft: briefing.status === 'speaking' ? 10 : 0 }}>
-                      {briefing.text}
-                    </p>
+                    <p className="pt-briefing-body" style={{ paddingLeft: briefing.status === 'speaking' ? 10 : 0 }}>{briefing.text}</p>
                   </div>
                 )}
                 {briefing.followUpQuestions && briefing.followUpQuestions.length > 0 && (
@@ -741,18 +578,7 @@ export function CommandCenter() {
                         key={i}
                         className="pt-followup-chip"
                         onClick={() => { setInput(q); inputRef.current?.focus(); }}
-                        style={{
-                          background: 'rgba(61, 242, 221, 0.06)',
-                          border: '1px solid rgba(61, 242, 221, 0.15)',
-                          borderRadius: 6,
-                          padding: '6px 10px',
-                          color: '#a8aab4',
-                          fontSize: 11,
-                          lineHeight: 1.4,
-                          textAlign: 'left',
-                          cursor: 'pointer',
-                          transition: 'all 150ms ease',
-                        }}
+                        style={{ background: 'rgba(61, 242, 221, 0.06)', border: '1px solid rgba(61, 242, 221, 0.15)', borderRadius: 6, padding: '6px 10px', color: '#a8aab4', fontSize: 11, lineHeight: 1.4, textAlign: 'left', cursor: 'pointer', transition: 'all 150ms ease' }}
                         onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(61, 242, 221, 0.12)'; e.currentTarget.style.color = '#eef0f4'; }}
                         onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(61, 242, 221, 0.06)'; e.currentTarget.style.color = '#a8aab4'; }}
                       >
@@ -764,88 +590,56 @@ export function CommandCenter() {
                 {briefing.status === 'error' && (
                   <div className="pt-hud" style={{ textAlign: 'center', padding: '8px 0', fontSize: 11 }}>
                     {briefing.error || 'Could not load briefing.'}
-                    <button onClick={refreshBriefing} style={{ marginLeft: 6, color: '#3df2dd', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}>
-                      Retry
-                    </button>
+                    <button onClick={refreshBriefing} style={{ marginLeft: 6, color: '#3df2dd', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}>Retry</button>
                   </div>
                 )}
               </div>
             )}
 
-            {/* Situational Awareness */}
             <SituationalPanel />
 
-            {/* Approval pending */}
             {approvals.length > 0 && (
               <div className="pt-panel pt-card pt-attention">
                 <h3>Approval pending</h3>
                 {approvals.slice(0, 3).map((action) => (
                   <div key={action.id}>
                     <div style={{ fontSize: '13.5px', color: '#a8aab4', lineHeight: 1.55 }}>
-                      <b style={{ color: '#eef0f4', fontWeight: 500 }}>{action.action_type}</b>{' '}
-                      {action.description}
+                      <b style={{ color: '#eef0f4', fontWeight: 500 }}>{action.action_type}</b>{' '}{action.description}
                     </div>
                     <div className="pt-btnrow">
-                      <button
-                        className="pt-ghost pt-approve"
-                        onClick={() => handleApprove(action.id)}
-                        disabled={!!processing[action.id]}
-                      >
-                        APPROVE
-                      </button>
-                      <button
-                        className="pt-ghost"
-                        onClick={() => handleDeny(action.id)}
-                        disabled={!!processing[action.id]}
-                      >
-                        DENY
-                      </button>
+                      <button className="pt-ghost pt-approve" onClick={() => handleApprove(action.id)} disabled={!!processing[action.id]}>APPROVE</button>
+                      <button className="pt-ghost" onClick={() => handleDeny(action.id)} disabled={!!processing[action.id]}>DENY</button>
                     </div>
                   </div>
                 ))}
               </div>
             )}
 
-            {/* Agents (collapsible) */}
             <div className="pt-panel pt-card">
-              <button
-                className="pt-dropdown-toggle"
-                onClick={() => setAgentsOpen((o) => !o)}
-              >
+              <button className="pt-dropdown-toggle" onClick={() => setAgentsOpen((o) => !o)}>
                 <h3 style={{ marginBottom: 0 }}>
                   Agents
-                  {runningAgents.length > 0 && (
-                    <span className="pt-hud" style={{ color: '#3df2dd', fontSize: 9, marginLeft: 8 }}>
-                      {runningAgents.length} running
-                    </span>
-                  )}
+                  {runningAgents.length > 0 && <span className="pt-hud" style={{ color: '#3df2dd', fontSize: 9, marginLeft: 8 }}>{runningAgents.length} running</span>}
                 </h3>
-                <ChevronDown
-                  size={14}
-                  className={`pt-chevron ${agentsOpen ? 'pt-chevron-open' : ''}`}
-                />
+                <ChevronDown size={14} className={`pt-chevron ${agentsOpen ? 'pt-chevron-open' : ''}`} />
               </button>
               {agentsOpen && (
-                agents.length === 0 ? (
-                  <div className="pt-hud pt-hud-dim" style={{ textAlign: 'center', padding: '12px 0' }}>No agents configured</div>
-                ) : (
-                  agents.map((agent) => (
-                    <div className="pt-row" key={agent.id}>
-                      <span className={`pt-dot ${agentDotClass(agent.status)}`} />
-                      {agent.name}
-                      <span className="pt-meta pt-hud pt-hud-dim">{agentLabel(agent.status)}</span>
-                    </div>
-                  ))
-                )
+                agents.length === 0
+                  ? <div className="pt-hud pt-hud-dim" style={{ textAlign: 'center', padding: '12px 0' }}>No agents configured</div>
+                  : agents.map((agent) => (
+                      <div className="pt-row" key={agent.id}>
+                        <span className={`pt-dot ${agentDotClass(agent.status)}`} />
+                        {agent.name}
+                        <span className="pt-meta pt-hud pt-hud-dim">{agentLabel(agent.status)}</span>
+                      </div>
+                    ))
               )}
             </div>
 
-            {/* Social Media placeholder */}
             <SocialPanel />
           </div>
         </div>
 
-        {/* Telemetry footer */}
         <TelemetryStrip latencyMs={latencyMs} approvalsCount={approvals.length} />
       </div>
     </div>

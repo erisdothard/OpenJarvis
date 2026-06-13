@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.types import ToolResult
+from openjarvis.tools._brand import brand_context
 from openjarvis.tools._stubs import BaseTool, ToolSpec
 
 _log = logging.getLogger(__name__)
@@ -73,8 +74,8 @@ def _build_draft_prompt(
             f"{reference_content[:2000]}\n"
         )
 
-    return f"""You are a social media content strategist for Syntra AI, an AI consulting firm that builds voice AI agents, workflow automation, and custom AI systems for businesses.
-
+    return f"""You are a social media content strategist for the company described in the brand context below.
+{brand_context()}
 ## Task
 Draft a social media post about the following topic for each specified platform.
 
@@ -83,12 +84,6 @@ Draft a social media post about the following topic for each specified platform.
 
 ## Tone
 {tone_desc}
-
-## Brand Voice
-- Syntra AI positions as "Intelligent Systems Engineering"
-- We build AI that runs businesses, not just answers questions
-- Focus on practical results, not AI hype
-- Credibility through case studies and technical depth
 {reference_section}
 ## Platform Requirements
 {"".join(platform_specs)}
@@ -219,7 +214,7 @@ class ContentDraftTool(BaseTool):
                 # Return raw content if JSON parsing fails
                 return ToolResult(
                     tool_name="content_draft",
-                    content=f"## Drafts\n\n{result.content}",
+                    content=f"## Drafts\n\n{response_text}",
                     success=True,
                     metadata={"raw": True},
                 )

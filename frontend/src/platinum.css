@@ -520,7 +520,7 @@ button.pt-ghost:disabled {
   bottom: 0;
   width: 2px;
   border-radius: 999px;
-  background: linear-gradient(to bottom, #3df2dd, #8c00ff);
+  background: linear-gradient(to bottom, #3df2dd, #00bcd4);
   animation: pt-beat 1.5s ease-in-out infinite;
 }
 .pt-briefing-ctrl {
@@ -644,8 +644,8 @@ button.pt-ghost:disabled {
   }
   .pt-inputbar {
     max-width: 100%;
-    padding: 12px 14px;
-    gap: 10px;
+    padding: 12px 12px;
+    gap: 8px;
   }
   .pt-inputbar input,
   .pt-inputbar textarea {

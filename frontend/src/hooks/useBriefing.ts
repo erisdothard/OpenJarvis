@@ -8,6 +8,7 @@ import {
   currentDigestType,
 } from '../lib/api';
 import type { DigestData, DigestType } from '../lib/api';
+import type { AudioManagerReturn } from './useAudioManager';
 
 function getGreeting(): string {
   const hour = new Date().getHours();
@@ -37,7 +38,6 @@ function getDigestLabel(type: DigestType): string {
   return "Here's your situation.";
 }
 
-/** Check if digest is stale. Morning/evening: 6h window. Midday: 4h window. */
 function isStale(digest: DigestData): boolean {
   try {
     const generated = new Date(digest.generated_at);
@@ -47,7 +47,6 @@ function isStale(digest: DigestData): boolean {
       generated.getMonth() === now.getMonth() &&
       generated.getDate() === now.getDate();
     if (!sameDay) return true;
-    // Midday updates have a shorter freshness window
     const maxAge = digest.digest_type === 'midday' ? 4 : 6;
     return now.getTime() - generated.getTime() > maxAge * 60 * 60 * 1000;
   } catch {
@@ -58,160 +57,102 @@ function isStale(digest: DigestData): boolean {
 const SESSION_KEY = 'oj-briefing-played';
 
 export interface BriefingControls {
-  /** Stop all TTS playback */
   interrupt: () => void;
-  /** Re-fetch and re-play the briefing */
   refresh: () => void;
-  /** Play (or replay) the briefing audio on demand */
   play: () => void;
-  /** Whether TTS is currently playing */
   isSpeaking: boolean;
-  /** Whether pre-generated audio is available */
   hasAudio: boolean;
 }
 
-export function useBriefing(): BriefingControls {
+/**
+ * Daily briefing hook.  Delegates all audio playback to the shared
+ * AudioManager so there is only one queue and one interrupt path.
+ */
+export function useBriefing(audioManager: AudioManagerReturn): BriefingControls {
   const speechEnabled = useAppStore((s) => s.settings.speechEnabled);
   const setBriefingStatus = useAppStore((s) => s.setBriefingStatus);
   const setBriefingText = useAppStore((s) => s.setBriefingText);
   const setBriefingError = useAppStore((s) => s.setBriefingError);
 
-  const audioQueueRef = useRef<HTMLAudioElement[]>([]);
-  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
-  const playingRef = useRef(false);
   const mountedRef = useRef(true);
   const hasRunRef = useRef(false);
   const hasAudioRef = useRef(false);
   const digestTextRef = useRef<string | null>(null);
 
-  // Clean up on unmount
+  // We track speaking locally via the AudioManager's callback.
+  // Because the AudioManager is shared, any new audio source (chat TTS,
+  // voice stream) will interrupt the briefing automatically.
+  const speakingRef = useRef(false);
+
   useEffect(() => {
     mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
+    return () => { mountedRef.current = false; };
   }, []);
 
   const interrupt = useCallback(() => {
-    if (currentAudioRef.current) {
-      currentAudioRef.current.pause();
-      if (currentAudioRef.current.src.startsWith('blob:')) {
-        URL.revokeObjectURL(currentAudioRef.current.src);
-      }
-      currentAudioRef.current = null;
-    }
-    for (const a of audioQueueRef.current) {
-      if (a.src.startsWith('blob:')) URL.revokeObjectURL(a.src);
-    }
-    audioQueueRef.current = [];
-    playingRef.current = false;
+    audioManager.interruptAll();
+    speakingRef.current = false;
     if (mountedRef.current) {
       const st = useAppStore.getState().briefing.status;
       if (st === 'speaking') setBriefingStatus('ready');
     }
-  }, [setBriefingStatus]);
+  }, [audioManager, setBriefingStatus]);
 
-  const playNextAudio = useCallback(() => {
-    if (audioQueueRef.current.length === 0) {
-      playingRef.current = false;
-      currentAudioRef.current = null;
-      if (mountedRef.current) setBriefingStatus('ready');
-      return;
-    }
-    playingRef.current = true;
-    const audio = audioQueueRef.current.shift()!;
-    currentAudioRef.current = audio;
-    audio.onended = () => {
-      if (audio.src.startsWith('blob:')) URL.revokeObjectURL(audio.src);
-      currentAudioRef.current = null;
-      playNextAudio();
-    };
-    audio.play().catch(() => playNextAudio());
-  }, [setBriefingStatus]);
+  /** Synthesize a single sentence and enqueue via AudioManager. */
+  const enqueueSentence = useCallback((text: string, gen: number) => {
+    const clean = text.replace(/[#*_~`>\[\]]/g, '').replace(/\n+/g, ' ').trim();
+    if (!clean) return;
+    synthesizeSpeech(clean)
+      .then((blob) => {
+        if (!mountedRef.current) return;
+        const url = URL.createObjectURL(blob);
+        audioManager.enqueueBlob(url, gen);
+      })
+      .catch((err) => {
+        console.warn('[Briefing] TTS sentence failed:', err?.message || err);
+        if (mountedRef.current) {
+          speakingRef.current = false;
+          setBriefingStatus('ready');
+        }
+      });
+  }, [audioManager, setBriefingStatus]);
 
-  /** Play pre-generated digest audio from the backend. */
-  const playDigestAudio = useCallback(() => {
-    if (!mountedRef.current) return;
-    interrupt();
-    setBriefingStatus('speaking');
-    const audio = new Audio(getDigestAudioUrl());
-    audioQueueRef.current.push(audio);
-    playingRef.current = false; // let playNextAudio set it
-    playNextAudio();
-  }, [interrupt, playNextAudio, setBriefingStatus]);
-
-  /** Fall back to sentence-level TTS synthesis. */
-  const speakText = useCallback(
-    (text: string) => {
-      setBriefingStatus('speaking');
-      const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
-      for (const sentence of sentences) {
-        const clean = sentence
-          .replace(/[#*_~`>\[\]]/g, '')
-          .replace(/\n+/g, ' ')
-          .trim();
-        if (!clean) continue;
-        synthesizeSpeech(clean)
-          .then((blob) => {
-            if (!mountedRef.current) return;
-            const url = URL.createObjectURL(blob);
-            const audio = new Audio(url);
-            audioQueueRef.current.push(audio);
-            if (!playingRef.current) playNextAudio();
-          })
-          .catch(() => {
-            // TTS failure for this sentence — skip it
-          });
-      }
-    },
-    [playNextAudio, setBriefingStatus],
-  );
-
-  /** Play the briefing: always announce live date/time first, then digest. */
   const play = useCallback(() => {
-    interrupt();
+    audioManager.interruptAll();
     setBriefingStatus('speaking');
+    speakingRef.current = true;
+
+    const gen = audioManager.getGeneration();
     const announcement = getLiveDateTimeAnnouncement();
 
     synthesizeSpeech(announcement)
       .then((blob) => {
         if (!mountedRef.current) return;
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        audioQueueRef.current.push(audio);
+        audioManager.enqueueBlob(URL.createObjectURL(blob), gen);
 
         if (hasAudioRef.current) {
           // Queue pre-generated digest audio after the announcement
-          const digestAudio = new Audio(getDigestAudioUrl());
-          audioQueueRef.current.push(digestAudio);
+          audioManager.enqueueBlob(getDigestAudioUrl(), gen);
         } else if (digestTextRef.current) {
-          // Queue sentence-level TTS after the announcement
           const sentences = digestTextRef.current.match(/[^.!?]+[.!?]+/g) || [digestTextRef.current];
-          for (const sentence of sentences) {
-            const clean = sentence.replace(/[#*_~`>\[\]]/g, '').replace(/\n+/g, ' ').trim();
-            if (!clean) continue;
-            synthesizeSpeech(clean)
-              .then((b) => {
-                if (!mountedRef.current) return;
-                const u = URL.createObjectURL(b);
-                audioQueueRef.current.push(new Audio(u));
-                if (!playingRef.current) playNextAudio();
-              })
-              .catch(() => {});
-          }
+          for (const s of sentences) enqueueSentence(s, gen);
         }
-
-        if (!playingRef.current) playNextAudio();
       })
-      .catch(() => {
-        // If date/time TTS fails, fall back to original behavior
+      .catch((err) => {
+        console.warn('[Briefing] Announcement TTS failed:', err?.message || err);
+        // Date/time TTS failed — fall back to digest audio/sentences
         if (hasAudioRef.current) {
-          playDigestAudio();
+          audioManager.enqueueBlob(getDigestAudioUrl(), gen);
         } else if (digestTextRef.current) {
-          speakText(digestTextRef.current);
+          const sentences = digestTextRef.current.match(/[^.!?]+[.!?]+/g) || [digestTextRef.current];
+          for (const s of sentences) enqueueSentence(s, gen);
+        } else {
+          // Nothing to fall back to — reset speaking state
+          speakingRef.current = false;
+          if (mountedRef.current) setBriefingStatus('ready');
         }
       });
-  }, [interrupt, playDigestAudio, speakText, playNextAudio, setBriefingStatus]);
+  }, [audioManager, setBriefingStatus, enqueueSentence]);
 
   const loadBriefing = useCallback(async () => {
     setBriefingStatus('loading');
@@ -219,7 +160,6 @@ export function useBriefing(): BriefingControls {
     const digestType = currentDigestType();
     let digest = await fetchDigest(digestType);
 
-    // If no digest or stale, generate one
     if (!digest || isStale(digest)) {
       setBriefingStatus('generating');
       digest = await generateDigest(digestType);
@@ -239,7 +179,6 @@ export function useBriefing(): BriefingControls {
 
     const greeting = getGreeting();
     const label = getDigestLabel(digest.digest_type || digestType);
-    // Strip any existing greeting from the digest text to avoid duplication
     const digestText = digest.text.replace(
       /^Good\s+(morning|afternoon|evening|night),?\s*(sir\.?)?\s*/i,
       '',
@@ -248,7 +187,6 @@ export function useBriefing(): BriefingControls {
     setBriefingText(fullText, digest.follow_up_questions || []);
     digestTextRef.current = fullText;
 
-    // Auto-play only once per session per digest type
     const sessionKey = `${SESSION_KEY}-${digest.digest_type || digestType}`;
     const today = new Date().toDateString();
     const alreadyPlayed = sessionStorage.getItem(sessionKey) === today;
@@ -261,18 +199,26 @@ export function useBriefing(): BriefingControls {
     }
   }, [speechEnabled, setBriefingStatus, setBriefingText, play]);
 
-  // Run once on mount
   useEffect(() => {
     if (hasRunRef.current) return;
     hasRunRef.current = true;
     loadBriefing();
   }, [loadBriefing]);
 
+  // When AudioManager finishes (someone else interrupted or queue drained),
+  // update briefing status if we were speaking.
+  useEffect(() => {
+    if (!audioManager.isPlaying && speakingRef.current) {
+      speakingRef.current = false;
+      if (mountedRef.current) setBriefingStatus('ready');
+    }
+  }, [audioManager.isPlaying, setBriefingStatus]);
+
   return {
     interrupt,
     refresh: loadBriefing,
     play,
-    isSpeaking: playingRef.current,
+    isSpeaking: speakingRef.current,
     hasAudio: hasAudioRef.current,
   };
 }

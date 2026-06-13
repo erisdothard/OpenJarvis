@@ -248,10 +248,57 @@ class ComplexityQueryAnalyzer(QueryAnalyzer):
         )
 
 
+
+# ---------------------------------------------------------------------------
+# Smart routing — downroute simple queries to cheaper models
+# ---------------------------------------------------------------------------
+
+_DOWNROUTE_MAP: dict[str, str] = {
+    "claude-sonnet-4-20250514": "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-6": "claude-haiku-4-5-20251001",
+    "claude-opus-4-20250514": "claude-sonnet-4-20250514",
+    "claude-opus-4-6": "claude-sonnet-4-6",
+}
+
+_TOOL_HINT_RE = re.compile(
+    r"\bemail\b|\bcalendar\b|\bschedule\b|\bsearch\b|\bfind\b|\blook\s*up\b"
+    r"|\bweather\b|\bremind\b|\bsend\b|\bread\b.*\bfile\b|\brun\b|\bexecute\b"
+    r"|\bopen\b|\bplay\b|\bcheck\b.*\b(inbox|slack|message)",
+    re.IGNORECASE,
+)
+
+
+def should_downroute(
+    tier: str,
+    current_model: str,
+    *,
+    has_tools: bool = False,
+    fast_model_override: str = "",
+    query: str = "",
+) -> str | None:
+    """Return a cheaper model if the query is simple enough, else None.
+
+    Returns ``None`` when:
+    - the tier is not ``trivial`` or ``simple``
+    - tools are attached to the request
+    - the query contains keywords that strongly hint at tool use
+    """
+    if tier not in ("trivial", "simple"):
+        return None
+    if has_tools:
+        return None
+    if query and _TOOL_HINT_RE.search(query):
+        return None
+    if fast_model_override:
+        return fast_model_override
+    return _DOWNROUTE_MAP.get(current_model)
+
+
 __all__ = [
     "ComplexityQueryAnalyzer",
     "ComplexityResult",
     "adjust_tokens_for_model",
     "is_thinking_model",
     "score_complexity",
+    "should_downroute",
 ]

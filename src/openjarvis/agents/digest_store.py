@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -193,6 +193,24 @@ class DigestStore:
                 (limit,),
             ).fetchall()
         return [self._row_to_artifact(r) for r in rows]
+
+    def purge(self, max_age_days: int = 14) -> int:
+        """Delete digest rows older than *max_age_days*.
+
+        ``generated_at`` is stored as an ISO 8601 string (e.g.
+        ``"2025-06-01T08:00:00"``).  ISO strings sort lexicographically in
+        the same order as time, so a plain string comparison is correct.
+
+        Returns the number of rows deleted.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        ).isoformat()
+        cur = self._conn.execute(
+            "DELETE FROM digests WHERE generated_at < ?", (cutoff,)
+        )
+        self._conn.commit()
+        return cur.rowcount
 
     def close(self) -> None:
         self._conn.close()

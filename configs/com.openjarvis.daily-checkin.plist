@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Phase 1: Send the 4 PM check-in iMessage.
+  Runs once daily at 4:00 PM. Sends one iMessage and exits (~5 seconds).
+
+  INSTALL:
+    cp configs/com.openjarvis.daily-checkin.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.openjarvis.daily-checkin.plist
+
+  TEST NOW:
+    launchctl start com.openjarvis.daily-checkin
+
+  LOGS:
+    tail -f ~/.openjarvis/logs/daily-checkin.log
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.openjarvis.daily-checkin</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/erisdothard/OpenJarvis/.venv/bin/python3</string>
+        <string>/Users/erisdothard/OpenJarvis/scripts/daily_checkin.py</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>16</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/erisdothard/.openjarvis/logs/daily-checkin.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/erisdothard/.openjarvis/logs/daily-checkin.log</string>
+</dict>
+</plist>

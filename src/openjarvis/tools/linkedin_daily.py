@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.types import ToolResult
+from openjarvis.tools._brand import brand_context
 from openjarvis.tools._stubs import BaseTool, ToolSpec
 
 _log = logging.getLogger(__name__)
@@ -201,8 +202,8 @@ def _build_post_prompt(
     if custom_topic:
         topic_section = f"\n## Specific Topic\nWrite about: {custom_topic}\n"
 
-    return f"""You are writing a LinkedIn post as Eris Dothard, founder of Syntra AI — an AI consulting firm that builds custom agentic workflows, voice AI, and automation systems for businesses.
-
+    return f"""You are writing a LinkedIn post as the founder of the AI consulting firm described in the brand context below.
+{brand_context()}
 ## What Top AI Builders Are Posting Right Now
 {creator_context}
 
@@ -215,14 +216,6 @@ def _build_post_prompt(
 ## Post Type: {post_type}
 {type_desc}
 {topic_section}
-## Who You Are (Eris / Syntra AI)
-- 30, Nashville. Left fintech (CPI Card Group) + Google Fiber to build AI systems
-- Co-founding an AI consulting firm with my father (16+ year enterprise developer, former IT Director)
-- Built FreightX ($10K SaaS for trucking), DispatchRelay (voice AI), BridgeLink Core
-- Enterprise-grade: CJIS security environment, HL7/FHIR healthcare data, OAuth 2.0
-- Anthropic-certified (Claude Certified Architect)
-- Stack: Python, FastAPI, React, LangChain, LangGraph, Claude API
-- Freelance model — custom agentic workflow installations, not cookie-cutter SaaS
 
 ## What Makes a Great LinkedIn Post (studied from the creators above)
 - FIRST LINE IS EVERYTHING. It's the only thing people see before "see more"
@@ -381,10 +374,7 @@ class LinkedInDailyTool(BaseTool):
 
                 response_text = llm_generate(
                     prompt=prompt,
-                    system_prompt=(
-                        "You are a LinkedIn content strategist who has studied "
-                        "what works for AI builders on LinkedIn. Output only valid JSON."
-                    ),
+                    system_prompt="Output only valid JSON.",
                 )
 
                 if not response_text:
@@ -405,7 +395,7 @@ class LinkedInDailyTool(BaseTool):
                 except json.JSONDecodeError:
                     all_posts.append({
                         "option": i + 1,
-                        "post": result.content,
+                        "post": response_text,
                         "raw": True,
                     })
 

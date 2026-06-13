@@ -26,6 +26,7 @@ _log = logging.getLogger(__name__)
 _LI_REST_BASE = "https://api.linkedin.com/rest"
 _LI_API_VERSION = "202506"
 _DEFAULT_TOKEN_PATH = str(DEFAULT_CONFIG_DIR / "connectors" / "linkedin.json")
+_SYNTRA_ORG_ID = "119034070"
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +160,23 @@ class LinkedInConnector(BaseConnector):
             self._load_config().get("member_id", ""),
         )
 
-    def _get_author_urn(self) -> str:
+    def _get_author_urn(self, target: str = "") -> str:
+        """Return the URN to post as.
+
+        ``target``:
+          - ``"syntra"`` → Syntra AI company page
+          - ``"personal"`` → Eris's personal profile
+          - ``""`` (default) → reads from config, falls back to personal
+
+        To switch default to Syntra page, set ``"default_target": "syntra"``
+        in ~/.openjarvis/connectors/linkedin.json after LinkedIn approves
+        the w_organization_social scope.
+        """
+        if not target:
+            target = self._load_config().get("default_target", "personal")
+        if target == "syntra":
+            org_id = self._load_config().get("org_id", _SYNTRA_ORG_ID)
+            return f"urn:li:organization:{org_id}"
         return f"urn:li:person:{self._get_member_id()}"
 
     def is_connected(self) -> bool:
@@ -269,7 +286,8 @@ class LinkedInConnector(BaseConnector):
             ToolSpec(
                 name="linkedin_create_post",
                 description=(
-                    "Publish a text post to Eris Dothard's LinkedIn profile."
+                    "Publish a text post to LinkedIn. Defaults to the Syntra AI "
+                    "company page. Set target to 'personal' for Eris's profile."
                 ),
                 parameters={
                     "type": "object",
@@ -277,6 +295,14 @@ class LinkedInConnector(BaseConnector):
                         "commentary": {
                             "type": "string",
                             "description": "The text content of the LinkedIn post.",
+                        },
+                        "target": {
+                            "type": "string",
+                            "enum": ["syntra", "personal"],
+                            "description": (
+                                "Where to post: 'syntra' for the Syntra AI company "
+                                "page (default), 'personal' for Eris's profile."
+                            ),
                         },
                     },
                     "required": ["commentary"],
@@ -303,7 +329,8 @@ class LinkedInConnector(BaseConnector):
 
         if tool_name == "linkedin_create_post":
             commentary = params["commentary"]
-            return _li_create_post(token, self._get_author_urn(), commentary)
+            target = params.get("target", "syntra")
+            return _li_create_post(token, self._get_author_urn(target), commentary)
         elif tool_name == "linkedin_get_profile":
             return _li_fetch_profile(token)
         else:

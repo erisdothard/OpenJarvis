@@ -30,6 +30,72 @@ from openjarvis.server.models import (
 router = APIRouter()
 logger = logging.getLogger("openjarvis.server")
 
+from openjarvis.server.response_cache import ResponseCache  # noqa: E402
+
+_response_cache = ResponseCache()
+
+
+def trim_history(messages: list, max_tokens: int, min_recent: int = 6) -> list:
+    """Trim old messages to fit within the token budget.
+
+    Keeps:
+    - All system messages (role="system") — never trimmed
+    - The most recent ``min_recent`` non-system messages unconditionally
+    - As many older non-system messages as fit in ``max_tokens``
+
+    Token estimation: ``len(content) / 4`` (chars-to-tokens rough ratio).
+
+    If any messages are dropped, a single placeholder system message is
+    prepended to the surviving history so the model knows context was cut.
+    """
+    # Separate system messages from the conversation
+    system_msgs = [m for m in messages if getattr(m, "role", None) == "system"
+                   or (isinstance(m, dict) and m.get("role") == "system")]
+    non_system = [m for m in messages if m not in system_msgs]
+
+    # Estimate total tokens for non-system history
+    def _msg_tokens(m) -> int:
+        content = getattr(m, "content", None) or (m.get("content", "") if isinstance(m, dict) else "")
+        return max(1, len(content) // 4)
+
+    total = sum(_msg_tokens(m) for m in non_system)
+    if total <= max_tokens:
+        return messages  # nothing to trim
+
+    # Always keep the most recent min_recent messages
+    recent = non_system[-min_recent:]
+    candidates = non_system[:-min_recent]  # older messages, in order
+
+    # Walk backwards through candidates, accumulating until budget is exhausted
+    budget = max_tokens - sum(_msg_tokens(m) for m in recent)
+    kept_older: list = []
+    for m in reversed(candidates):
+        cost = _msg_tokens(m)
+        if budget >= cost:
+            kept_older.insert(0, m)
+            budget -= cost
+        # If this message doesn't fit, keep walking (smaller earlier messages
+        # might still fit, but for simplicity we stop here to preserve order).
+        else:
+            break
+
+    dropped = len(candidates) - len(kept_older)
+    if dropped > 0:
+        logger.debug(
+            "trim_history: dropped %d message(s) to stay within %d-token budget",
+            dropped,
+            max_tokens,
+        )
+        from openjarvis.server.models import ChatMessage
+
+        notice = ChatMessage(
+            role="system",
+            content="[Earlier conversation history trimmed to save context]",
+        )
+        return system_msgs + [notice] + kept_older + recent
+
+    return system_msgs + kept_older + recent
+
 
 def _get_registered_tools_openai() -> List[Dict[str, Any]]:
     """Convert all ToolRegistry entries to OpenAI function-calling format."""
@@ -95,11 +161,58 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     agent = getattr(request.app.state, "agent", None)
     model = request_body.model
 
-    # Inject memory context into messages before dispatching
     config = getattr(request.app.state, "config", None)
     memory_backend = getattr(request.app.state, "memory_backend", None)
+
+    # Extract user query for complexity analysis and post-chat memory storage
+    query_text_for_memory = ""
+    for m in reversed(request_body.messages):
+        if m.role == "user" and m.content:
+            query_text_for_memory = m.content
+            break
+
+    # Run complexity analysis BEFORE memory injection so we can skip the
+    # knowledge-store retrieval for trivial queries (e.g. "hi", "thanks").
+    complexity_info = None
+    query_text_for_complexity = query_text_for_memory
+    if query_text_for_complexity:
+        try:
+            from openjarvis.learning.routing.complexity import (
+                adjust_tokens_for_model,
+                score_complexity,
+            )
+
+            cr = score_complexity(query_text_for_complexity)
+            suggested = adjust_tokens_for_model(
+                cr.suggested_max_tokens,
+                model,
+            )
+            complexity_info = ComplexityInfo(
+                score=cr.score,
+                tier=cr.tier,
+                suggested_max_tokens=suggested,
+            )
+            # Bump max_tokens when complexity suggests more than what
+            # the client requested — never reduce below the request value.
+            if suggested > request_body.max_tokens:
+                request_body.max_tokens = suggested
+        except Exception:
+            logging.getLogger("openjarvis.server").debug(
+                "Complexity analysis failed",
+                exc_info=True,
+            )
+
+    # Skip knowledge-store retrieval for trivial queries to avoid spending
+    # ~2 048 tokens of context on messages like "hi" or "thanks".
+    _skip_memory = (
+        complexity_info is not None
+        and complexity_info.tier == "trivial"
+    )
+
+    # Inject memory context into messages before dispatching
     if (
-        config is not None
+        not _skip_memory
+        and config is not None
         and memory_backend is not None
         and config.agent.context_from_memory
         and request_body.messages
@@ -147,42 +260,45 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                 "Memory context injection failed",
                 exc_info=True,
             )
+    elif _skip_memory:
+        logger.debug(
+            "Memory injection skipped — trivial query (tier=%s, score=%.2f): %r",
+            complexity_info.tier,
+            complexity_info.score,
+            query_text_for_memory[:80],
+        )
 
-    # Extract user query for complexity analysis and post-chat memory storage
-    query_text_for_memory = ""
-    for m in reversed(request_body.messages):
-        if m.role == "user" and m.content:
-            query_text_for_memory = m.content
-            break
+    # Smart model routing — downroute trivial/simple queries to a cheaper model
+    # (e.g. Haiku instead of Sonnet) when no tools are attached and the query
+    # does not hint at tool use.  Must run AFTER complexity analysis and BEFORE
+    # system prompt injection / tool injection so all downstream paths see the
+    # updated model name.
+    original_model = None
+    if (
+        complexity_info is not None
+        and config is not None
+        and getattr(config.intelligence, "smart_routing_enabled", True)
+    ):
+        from openjarvis.learning.routing.complexity import should_downroute
 
-    # Run complexity analysis on the last user message
-    complexity_info = None
-    query_text_for_complexity = query_text_for_memory
-    if query_text_for_complexity:
-        try:
-            from openjarvis.learning.routing.complexity import (
-                adjust_tokens_for_model,
-                score_complexity,
-            )
-
-            cr = score_complexity(query_text_for_complexity)
-            suggested = adjust_tokens_for_model(
-                cr.suggested_max_tokens,
+        fast_model = getattr(config.intelligence, "fast_model", "") or ""
+        downrouted = should_downroute(
+            complexity_info.tier,
+            model,
+            has_tools=bool(request_body.tools),
+            fast_model_override=fast_model,
+            query=query_text_for_memory,
+        )
+        if downrouted and downrouted != model:
+            original_model = model
+            model = downrouted
+            request_body.model = model  # Update the request body too
+            logger.info(
+                "Smart routing: %s -> %s (tier=%s, score=%.3f)",
+                original_model,
                 model,
-            )
-            complexity_info = ComplexityInfo(
-                score=cr.score,
-                tier=cr.tier,
-                suggested_max_tokens=suggested,
-            )
-            # Bump max_tokens when complexity suggests more than what
-            # the client requested — never reduce below the request value.
-            if suggested > request_body.max_tokens:
-                request_body.max_tokens = suggested
-        except Exception:
-            logging.getLogger("openjarvis.server").debug(
-                "Complexity analysis failed",
-                exc_info=True,
+                complexity_info.tier,
+                complexity_info.score,
             )
 
     # Inject system prompt (persona, SOUL/MEMORY/USER) when no system message
@@ -191,7 +307,6 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     _has_system = any(m.role == "system" for m in request_body.messages)
     if not _has_system and config is not None:
         try:
-            from openjarvis.prompt.builder import SystemPromptBuilder
             from openjarvis.server.models import ChatMessage
 
             agent_cfg = getattr(config, "agent", None)
@@ -201,12 +316,22 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                     agent_cfg.system_prompt
                     or agent_cfg.default_system_prompt
                 )
-            builder = SystemPromptBuilder(
-                agent_template=agent_template,
-                memory_files_config=getattr(config, "memory_files", None),
-                system_prompt_config=getattr(config, "system_prompt", None),
-            )
-            sys_prompt = builder.build()
+            prompt_cache = getattr(request.app.state, "prompt_cache", None)
+            if prompt_cache is not None:
+                builder = prompt_cache.get_or_create(
+                    agent_template=agent_template,
+                    memory_files_config=getattr(config, "memory_files", None),
+                    system_prompt_config=getattr(config, "system_prompt", None),
+                )
+                sys_prompt = builder.build()
+            else:
+                from openjarvis.prompt.builder import SystemPromptBuilder
+
+                sys_prompt = SystemPromptBuilder(
+                    agent_template=agent_template,
+                    memory_files_config=getattr(config, "memory_files", None),
+                    system_prompt_config=getattr(config, "system_prompt", None),
+                ).build()
             if sys_prompt and sys_prompt.strip():
                 request_body.messages.insert(
                     0,
@@ -215,14 +340,49 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
         except Exception:
             logger.debug("System prompt injection failed", exc_info=True)
 
+    # Trim conversation history to prevent unbounded token growth.
+    # Applied AFTER system prompt injection so system tokens are never
+    # counted against the history budget.
+    _max_hist = (
+        getattr(getattr(config, "system_prompt", None), "max_history_tokens", 32_000)
+        if config is not None
+        else 32_000
+    )
+    request_body.messages = trim_history(request_body.messages, _max_hist)
+
+    # Response cache — serve deterministic non-streaming responses from cache.
+    # Evaluated after all pre-processing (model routing, memory injection,
+    # system prompt, history trim) so the cache key reflects the exact inputs
+    # the engine would receive.
+    _cache_key: str | None = None
+    if ResponseCache.is_cacheable(request_body.temperature, request_body.stream, bool(request_body.tools)):
+        _msg_dicts = [
+            {
+                "role": getattr(m, "role", m.get("role", "") if isinstance(m, dict) else ""),
+                "content": getattr(m, "content", m.get("content", "") if isinstance(m, dict) else ""),
+            }
+            for m in request_body.messages
+        ]
+        _cache_key = ResponseCache.make_key(model, _msg_dicts, request_body.temperature, request_body.max_tokens)
+        _cached = _response_cache.get(_cache_key)
+        if _cached is not None:
+            logger.debug("Serving response from cache (key=%s…)", _cache_key[:8])
+            return _cached
+
     if request_body.stream:
         # Auto-inject registered tools when the client doesn't pass any.
         # This enables the main chat UI to call tools (calendar, email, etc.)
         # without needing the frontend to know about every tool definition.
+        # Smart filtering: only send tools relevant to the query (reduces
+        # per-request token overhead from ~4-10k tokens down to ~500-1500).
         if not request_body.tools:
+            from openjarvis.server.tool_filter import filter_tools_for_query
+
             auto_tools = _get_registered_tools_openai()
             if auto_tools:
-                request_body.tools = auto_tools
+                request_body.tools = filter_tools_for_query(
+                    query_text_for_memory, auto_tools
+                )
 
         if request_body.tools:
             return await _handle_stream_with_tool_loop(
@@ -257,6 +417,8 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                 resp.choices[0].message.content or "",
                 model,
             )
+        if _cache_key is not None:
+            _response_cache.put(_cache_key, resp)
         return resp
 
     bus = getattr(request.app.state, "bus", None)
@@ -276,6 +438,8 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
             resp.choices[0].message.content or "",
             model,
         )
+    if _cache_key is not None:
+        _response_cache.put(_cache_key, resp)
     return resp
 
 

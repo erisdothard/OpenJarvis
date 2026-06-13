@@ -26,6 +26,7 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from openjarvis.core.types import Message, Role
+from openjarvis.prompt import VOICE_PREAMBLE
 
 logger = logging.getLogger("openjarvis.voice_ws")
 
@@ -124,6 +125,9 @@ def _transcribe_sync(speech_backend, pcm_bytes: bytes) -> str:
             pass
 
 
+_OPENAI_VOICES = {"alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"}
+
+
 def _openai_tts_sync(text: str, voice: str, api_key: str) -> bytes:
     """Synthesize text via OpenAI TTS.
 
@@ -132,6 +136,11 @@ def _openai_tts_sync(text: str, voice: str, api_key: str) -> bytes:
     """
     import httpx
     import struct
+
+    # Validate voice — reject non-OpenAI IDs
+    if voice not in _OPENAI_VOICES:
+        logger.warning("Invalid OpenAI voice '%s', falling back to 'fable'", voice)
+        voice = "fable"
 
     resp = httpx.post(
         "https://api.openai.com/v1/audio/speech",
@@ -148,7 +157,10 @@ def _openai_tts_sync(text: str, voice: str, api_key: str) -> bytes:
         },
         timeout=30.0,
     )
-    resp.raise_for_status()
+    if not resp.is_success:
+        body = resp.text[:500] if resp.text else "(empty)"
+        logger.error("OpenAI TTS %s: voice=%s len=%d body: %s", resp.status_code, voice, len(text), body)
+        resp.raise_for_status()
 
     # OpenAI pcm returns s16le @ 24kHz — convert to float32
     s16_data = resp.content
@@ -194,18 +206,6 @@ class VoiceSession:
 
     def _build_system_prompt(self) -> str:
         """Build system prompt matching the chat path, with voice-specific guidance."""
-        voice_preamble = (
-            "You are Jarvis, a voice assistant. You are responding via speech.\n\n"
-            "CRITICAL RULES FOR VOICE MODE:\n"
-            "- Answer simple questions DIRECTLY. Do NOT use tools for questions you "
-            "already know the answer to (dates, math, facts, definitions, opinions).\n"
-            "- Keep responses concise and conversational — the user is listening, not reading.\n"
-            "- Only use tools when the user explicitly asks you to DO something "
-            "(create a reminder, send a message, search the web, look something up "
-            "that requires real-time data, etc.).\n"
-            "- Never narrate your tool usage. Just do it and report the result.\n"
-        )
-
         # Try to load the same persona/memory the chat path uses
         try:
             from openjarvis.prompt.builder import SystemPromptBuilder
@@ -226,11 +226,11 @@ class VoiceSession:
                 )
                 persona = builder.build()
                 if persona and persona.strip():
-                    return voice_preamble + "\n" + persona.strip()
+                    return VOICE_PREAMBLE + "\n" + persona.strip()
         except Exception:
             logger.debug("Voice system prompt builder failed", exc_info=True)
 
-        return voice_preamble
+        return VOICE_PREAMBLE
 
     async def run_pipeline(self, speech_pcm: bytes) -> None:
         """Full pipeline: transcribe → LLM (with tools) → TTS → stream audio.
@@ -574,9 +574,7 @@ async def voice_stream(websocket: WebSocket):
                 if msg_type == "session.start":
                     config = data.get("config", {})
                     model = config.get("model", "claude-sonnet-4-20250514")
-                    voice_id = config.get(
-                        "voice_id", "JBFqnCBsd6RMkjVDRZzb"
-                    )
+                    voice_id = config.get("voice_id", "") or "fable"
 
                     # Initialize VAD
                     try:

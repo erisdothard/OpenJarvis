@@ -32,3 +32,39 @@ def secure_create(path: Path, mode: int = 0o600) -> Path:
         path.touch()
     os.chmod(path, mode)
     return path
+
+
+def audit_config_permissions(config_dir: Path) -> list[str]:
+    """Scan *config_dir* for sensitive files with excessive permissions.
+
+    Checks every ``*.db``, ``*.env``, and ``cloud-keys.env`` file found
+    (recursively) under *config_dir*.  Any file whose group or other read/
+    write bits are set is silently chmoded to ``0o600``.
+
+    Returns a list of paths that were corrected (as strings), so callers
+    can log them if desired.
+    """
+    corrected: list[str] = []
+    patterns = ("*.db", "*.env")
+
+    candidates: list[Path] = []
+    for pattern in patterns:
+        candidates.extend(config_dir.rglob(pattern))
+    # Also pick up cloud-keys.env regardless of extension pattern coverage
+    cloud_keys = config_dir / "cloud-keys.env"
+    if cloud_keys.exists() and cloud_keys not in candidates:
+        candidates.append(cloud_keys)
+
+    for filepath in candidates:
+        if not filepath.is_file():
+            continue
+        try:
+            current = filepath.stat().st_mode & 0o777
+            # Group or other has any access bits
+            if current & 0o077:
+                os.chmod(filepath, 0o600)
+                corrected.append(str(filepath))
+        except OSError:
+            pass
+
+    return corrected

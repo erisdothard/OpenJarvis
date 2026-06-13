@@ -1,14 +1,12 @@
 /**
  * WebSocket voice streaming hook.
  *
- * Replaces the record→upload→transcribe→LLM→TTS relay with a single
- * persistent WebSocket that streams raw PCM both ways:
+ * Streams raw PCM mic audio to the server, which handles VAD, STT, LLM
+ * inference, and TTS.  Audio chunks and control messages come back over the
+ * same WebSocket.
  *
- *   Mic PCM → Server VAD → faster-whisper → LLM → Cartesia TTS → Speaker
- *
- * When the server-side Silero VAD + STT backend aren't available the hook
- * reports `available === false` and callers should fall back to the legacy
- * useSpeech + HTTP streaming path.
+ * Playback is delegated to the caller via the onAudioData / onStopPlayback
+ * callbacks (typically wired to useAudioManager).
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -30,11 +28,15 @@ export interface UseVoiceStreamOptions {
   onLlmDelta?: (delta: string) => void;
   onLlmDone?: (content: string) => void;
   onStateChange?: (state: VoiceStreamState) => void;
-  /** Audio level 0–1 (mic input when listening, TTS output when speaking). */
+  /** Audio level 0–1 (mic input when listening). */
   onAudioLevel?: (level: number) => void;
   onToolStart?: (tool: string, args: string) => void;
   onToolEnd?: (tool: string, success: boolean, latency: number) => void;
   onError?: (detail: string) => void;
+  /** Called when a binary PCM float32 audio chunk arrives from TTS. */
+  onAudioData?: (pcm: ArrayBuffer) => void;
+  /** Called when playback should stop (barge-in, explicit server stop, disconnect). */
+  onStopPlayback?: () => void;
 }
 
 export interface UseVoiceStreamReturn {
@@ -54,22 +56,15 @@ export function useVoiceStream(options: UseVoiceStreamOptions): UseVoiceStreamRe
   const [state, setState] = useState<VoiceStreamState>('disconnected');
   const [available, setAvailable] = useState<boolean | null>(null);
 
-  // Stable ref to latest callbacks so closures never go stale.
   const optRef = useRef(options);
   optRef.current = options;
 
-  // ── Refs for WebSocket + Audio plumbing ──
+  // ── Refs for WebSocket + mic plumbing ──
   const wsRef = useRef<WebSocket | null>(null);
   const micCtxRef = useRef<AudioContext | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const micAnalyserRef = useRef<AnalyserNode | null>(null);
-
-  // Playback
-  const playCtxRef = useRef<AudioContext | null>(null);
-  const playAnalyserRef = useRef<AnalyserNode | null>(null);
-  const nextPlayTimeRef = useRef(0);
-  const playingRef = useRef(false);
 
   // Level monitor
   const rafRef = useRef(0);
@@ -91,24 +86,17 @@ export function useVoiceStream(options: UseVoiceStreamOptions): UseVoiceStreamRe
     optRef.current.onStateChange?.(s);
   }, []);
 
-  // ── Audio level ticker ──
+  // ── Mic audio level ticker ──
   const startLevelMonitor = useCallback(() => {
     cancelAnimationFrame(rafRef.current);
-    const micBuf = new Uint8Array(128);
-    const playBuf = new Uint8Array(128);
+    const buf = new Uint8Array(128);
     const tick = () => {
       const s = stateRef.current;
-      let level = 0;
-      if (s === 'speaking' && playAnalyserRef.current) {
-        playAnalyserRef.current.getByteFrequencyData(playBuf);
-        const rms = Math.sqrt(playBuf.reduce((a, v) => a + v * v, 0) / playBuf.length);
-        level = Math.min(rms / 80, 1);
-      } else if ((s === 'idle' || s === 'listening') && micAnalyserRef.current) {
-        micAnalyserRef.current.getByteFrequencyData(micBuf);
-        const rms = Math.sqrt(micBuf.reduce((a, v) => a + v * v, 0) / micBuf.length);
-        level = Math.min(rms / 128, 1);
+      if ((s === 'idle' || s === 'listening') && micAnalyserRef.current) {
+        micAnalyserRef.current.getByteFrequencyData(buf);
+        const rms = Math.sqrt(buf.reduce((a, v) => a + v * v, 0) / buf.length);
+        optRef.current.onAudioLevel?.(Math.min(rms / 128, 1));
       }
-      optRef.current.onAudioLevel?.(level);
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
@@ -118,49 +106,6 @@ export function useVoiceStream(options: UseVoiceStreamOptions): UseVoiceStreamRe
     cancelAnimationFrame(rafRef.current);
     optRef.current.onAudioLevel?.(0);
   }, []);
-
-  // ── Playback helpers ──
-  const stopPlayback = useCallback(() => {
-    playingRef.current = false;
-    if (playCtxRef.current) {
-      playCtxRef.current.close().catch(() => {});
-      playCtxRef.current = null;
-    }
-    playAnalyserRef.current = null;
-    nextPlayTimeRef.current = 0;
-  }, []);
-
-  const ensurePlayCtx = useCallback((): AudioContext => {
-    if (!playCtxRef.current || playCtxRef.current.state === 'closed') {
-      const ctx = new AudioContext({ sampleRate: 24000 });
-      playCtxRef.current = ctx;
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      analyser.connect(ctx.destination);
-      playAnalyserRef.current = analyser;
-    }
-    return playCtxRef.current;
-  }, []);
-
-  const playChunk = useCallback((pcm: ArrayBuffer) => {
-    const ctx = ensurePlayCtx();
-    const samples = new Float32Array(pcm);
-    if (samples.length === 0) return;
-
-    const buf = ctx.createBuffer(1, samples.length, 24000);
-    buf.getChannelData(0).set(samples);
-
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    if (playAnalyserRef.current) src.connect(playAnalyserRef.current);
-    else src.connect(ctx.destination);
-
-    const now = ctx.currentTime;
-    const start = Math.max(now + 0.005, nextPlayTimeRef.current);
-    src.start(start);
-    nextPlayTimeRef.current = start + buf.duration;
-    playingRef.current = true;
-  }, [ensurePlayCtx]);
 
   // ── WebSocket message handler ──
   const handleMsg = useCallback((ev: MessageEvent) => {
@@ -188,16 +133,12 @@ export function useVoiceStream(options: UseVoiceStreamOptions): UseVoiceStreamRe
           notify('speaking');
           break;
         case 'tts.done':
-          // TTS chunk finished — stay in current state (more chunks may follow,
-          // or the server will send state:idle when the full response is done)
           break;
         case 'vad.speech_start':
-          // Barge-in: user started talking again — kill TTS playback immediately
-          stopPlayback();
+          optRef.current.onStopPlayback?.();
           break;
         case 'stop_playback':
-          // Server explicitly requests playback stop (interrupt / barge-in)
-          stopPlayback();
+          optRef.current.onStopPlayback?.();
           break;
         case 'tool.start':
           optRef.current.onToolStart?.(msg.tool as string, msg.arguments as string);
@@ -210,14 +151,14 @@ export function useVoiceStream(options: UseVoiceStreamOptions): UseVoiceStreamRe
           break;
       }
     } else {
-      // Binary frame — PCM float32 audio from Cartesia TTS
+      // Binary frame — PCM float32 audio from TTS
       if (ev.data instanceof ArrayBuffer) {
-        playChunk(ev.data);
+        optRef.current.onAudioData?.(ev.data);
       } else if (ev.data instanceof Blob) {
-        ev.data.arrayBuffer().then(playChunk);
+        ev.data.arrayBuffer().then((buf) => optRef.current.onAudioData?.(buf));
       }
     }
-  }, [notify, playChunk, stopPlayback]);
+  }, [notify]);
 
   // ── Disconnect ──
   const disconnect = useCallback(() => {
@@ -235,18 +176,18 @@ export function useVoiceStream(options: UseVoiceStreamOptions): UseVoiceStreamRe
     micAnalyserRef.current = null;
     micCtxRef.current?.close().catch(() => {});
     micCtxRef.current = null;
-    stopPlayback();
+    optRef.current.onStopPlayback?.();
     stopLevelMonitor();
     notify('disconnected');
-  }, [stopPlayback, stopLevelMonitor, notify]);
+  }, [stopLevelMonitor, notify]);
 
   // ── Interrupt (stop TTS, reset server pipeline) ──
   const interrupt = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'interrupt' }));
     }
-    stopPlayback();
-  }, [stopPlayback]);
+    optRef.current.onStopPlayback?.();
+  }, []);
 
   // ── Force commit speech ──
   const commit = useCallback(() => {
@@ -261,13 +202,11 @@ export function useVoiceStream(options: UseVoiceStreamOptions): UseVoiceStreamRe
     notify('connecting');
 
     try {
-      // 1. Get mic permission
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
       streamRef.current = stream;
 
-      // 2. AudioContext + WorkletNode
       const micCtx = new AudioContext();
       micCtxRef.current = micCtx;
       await micCtx.audioWorklet.addModule('/mic-capture-processor.js');
@@ -280,16 +219,13 @@ export function useVoiceStream(options: UseVoiceStreamOptions): UseVoiceStreamRe
       const worklet = new AudioWorkletNode(micCtx, 'mic-capture-processor');
       workletRef.current = worklet;
 
-      // source → analyser → worklet (no destination — don't echo mic)
       micSource.connect(analyser);
       analyser.connect(worklet);
 
-      // 3. Open WebSocket
       const ws = new WebSocket(getVoiceWsUrl());
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
-      // Pipe PCM chunks to server
       worklet.port.onmessage = (e) => {
         if (ws.readyState === WebSocket.OPEN) ws.send(e.data);
       };
@@ -310,9 +246,7 @@ export function useVoiceStream(options: UseVoiceStreamOptions): UseVoiceStreamRe
       ws.onmessage = handleMsg;
       ws.onclose = () => { if (wsRef.current === ws) disconnect(); };
 
-      // 4. Start level ticker
       startLevelMonitor();
-
     } catch (err: unknown) {
       disconnect();
       const msg = err instanceof Error ? err.message : 'Connection failed';

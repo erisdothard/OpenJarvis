@@ -651,3 +651,17 @@ class GmailConnector(BaseConnector):
                 category="communication",
             ),
         ]
+
+
+_SYNTRA_CREDENTIALS_PATH = str(DEFAULT_CONFIG_DIR / "connectors" / "gmail_syntra.json")
+
+
+@ConnectorRegistry.register("gmail_syntra")
+class GmailSyntraConnector(GmailConnector):
+    """Gmail connector for the Syntra AI account."""
+
+    connector_id = "gmail_syntra"
+    display_name = "Gmail (Syntra)"
+
+    def __init__(self, credentials_path: str = "") -> None:
+        super().__init__(credentials_path or _SYNTRA_CREDENTIALS_PATH)

@@ -5,7 +5,6 @@
 @import "@fontsource-variable/geist-mono";
 @import "./hud.css";
 @import "./chroma.css";
-@import "./chromatic-advanced.css";
 @import "./platinum.css";
 @custom-variant dark (&:is(.dark *));
 
@@ -34,13 +33,12 @@
     --color-text-inverse: #000000;
     --color-text-bright: #eef0f4;
 
-    /* ── Chromatic Spectrum ── */
+    /* ── Platinum Accent Palette ── */
     --chroma-cyan: #00e5ff;
-    --chroma-magenta: #ff00aa;
-    --chroma-yellow: #ffea00;
-    --chroma-green: #00ff87;
-    --chroma-orange: #ff6d00;
-    --chroma-violet: #8c00ff;
+    --chroma-teal: #3df2dd;
+    --chroma-silver: #d8dae4;
+    --chroma-steel: #9a9cae;
+    --chroma-amber: #ffb300;
     --chroma-white: #ffffff;
 
     /* ── Primary accent: cyan (dominant in liquid metal) ── */
@@ -50,20 +48,20 @@
     --color-accent-glow: rgba(0, 229, 255, 0.15);
     --color-accent-ghost: rgba(0, 229, 255, 0.03);
 
-    /* ── Chromatic gradient (the full spectrum) ── */
+    /* ── Platinum gradient (silver-chrome with teal accent) ── */
     --chroma-gradient: linear-gradient(
       90deg,
-      #ff0080, #ff6d00, #ffea00, #00ff87, #00e5ff, #8c00ff, #ff0080
+      #6a6c78, #d8dae4, #00e5ff, #3df2dd, #d8dae4, #9a9cae, #6a6c78
     );
     --chroma-gradient-subtle: linear-gradient(
       90deg,
-      rgba(255, 0, 128, 0.4),
-      rgba(255, 109, 0, 0.4),
-      rgba(255, 234, 0, 0.4),
-      rgba(0, 255, 135, 0.4),
-      rgba(0, 229, 255, 0.4),
-      rgba(140, 0, 255, 0.4),
-      rgba(255, 0, 128, 0.4)
+      rgba(106, 108, 120, 0.4),
+      rgba(216, 218, 228, 0.4),
+      rgba(0, 229, 255, 0.3),
+      rgba(61, 242, 221, 0.3),
+      rgba(216, 218, 228, 0.4),
+      rgba(154, 156, 174, 0.4),
+      rgba(106, 108, 120, 0.4)
     );
 
     /* ── Amber (warnings) ── */
@@ -72,10 +70,10 @@
     --color-accent-amber-subtle: rgba(255, 179, 0, 0.06);
     --color-accent-amber-glow: rgba(255, 179, 0, 0.12);
 
-    /* ── Purple (compat alias) ── */
-    --color-accent-purple: #8c00ff;
-    --color-accent-purple-hover: #a840ff;
-    --color-accent-purple-subtle: rgba(140, 0, 255, 0.06);
+    /* ── Secondary accent (teal) ── */
+    --color-accent-purple: #3df2dd;
+    --color-accent-purple-hover: #5ff8e8;
+    --color-accent-purple-subtle: rgba(61, 242, 221, 0.06);
     --color-accent-blue-subtle: rgba(0, 229, 255, 0.06);
 
     /* ── Semantic ── */
@@ -100,7 +98,7 @@
     --shadow-lg: 0 12px 40px -8px rgb(0 0 0 / 0.8);
     --shadow-glow: 0 0 24px -4px rgba(0, 229, 255, 0.08);
     --shadow-chroma: 0 0 20px -4px rgba(0, 229, 255, 0.06),
-                     0 0 40px -8px rgba(140, 0, 255, 0.04);
+                     0 0 40px -8px rgba(61, 242, 221, 0.04);
 
     /* ── Radii ── */
     --radius-sm: 6px;
