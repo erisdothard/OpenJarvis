@@ -144,6 +144,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.connectors.stocks  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.connectors.instagram  # noqa: F401
 except ImportError:
     pass

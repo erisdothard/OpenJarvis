@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -289,14 +290,23 @@ def _run_applescript(script: str, *, timeout: float = 30.0) -> subprocess.Comple
 
 
 # ---------------------------------------------------------------------------
+# Message sender (iMessage via AppleScript)
+# ---------------------------------------------------------------------------
+
+
+def _send_message(to: str, body: str) -> bool:
+    """Send a notification via iMessage."""
+    from openjarvis.channels.imessage_daemon import send_imessage
+    return send_imessage(to, body)
+
+
+# ---------------------------------------------------------------------------
 # Main poll + notify loop
 # ---------------------------------------------------------------------------
 
 
 def _poll_and_notify(phone: str) -> int:
     """Run one poll cycle. Returns number of notifications sent."""
-    from openjarvis.channels.imessage_daemon import send_imessage
-
     notified = _prune_old(_load_notified())
     sent = 0
     notified_names: set[str] = set()  # track names sent this cycle
@@ -314,7 +324,7 @@ def _poll_and_notify(phone: str) -> int:
             notified_names.add(key)
             continue
         msg = _format_reminder_msg(item)
-        if send_imessage(phone, msg):
+        if _send_message(phone, msg):
             notified[key] = time.time()
             notified_names.add(key)
             sent += 1
@@ -332,7 +342,7 @@ def _poll_and_notify(phone: str) -> int:
         if key in notified:
             continue
         msg = _format_event_msg(item)
-        if send_imessage(phone, msg):
+        if _send_message(phone, msg):
             notified[key] = time.time()
             sent += 1
             logger.info("Sent event notification: %s", item["name"])

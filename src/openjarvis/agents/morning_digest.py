@@ -47,7 +47,7 @@ class MorningDigestAgent(ToolUsingAgent):
         # Extract digest-specific kwargs before passing to parent
         self._persona = kwargs.pop("persona", "jarvis")
         self._sections = kwargs.pop(
-            "sections", ["messages", "calendar", "health", "world"]
+            "sections", ["messages", "calendar", "health", "world", "stocks"]
         )
         self._section_sources = kwargs.pop("section_sources", {})
         self._timezone = kwargs.pop("timezone", "America/Los_Angeles")
@@ -126,9 +126,12 @@ class MorningDigestAgent(ToolUsingAgent):
             "4. HEALTH — Interpret trends, not raw numbers. 'Your sleep has "
             "improved three nights running and your readiness is strong' — "
             "not 'HRV 53, HR 56.' If multiple days of data, compare.\n\n"
-            "5. WORLD — Weather forecast, top news (AI/tech, business, "
-            "general). Skip if no data.\n\n"
-            "6. CLOSING — One forward-looking sentence with the honorific.\n\n"
+            "5. MARKETS — Quick market snapshot: where the major indices "
+            "(S&P 500, Dow, NASDAQ) stand and their direction. One or two "
+            "sentences max. Skip if no data.\n\n"
+            "6. WORLD — Weather forecast, top AI and tech news (especially "
+            "Anthropic, Claude, and AI industry developments). Skip if no data.\n\n"
+            "7. CLOSING — One forward-looking sentence with the honorific.\n\n"
             "- STRICT LIMIT: 200 words. Be concise."
         )
 
@@ -198,6 +201,7 @@ class MorningDigestAgent(ToolUsingAgent):
             ],
             "calendar": ["gcalendar", "apple_calendar"],
             "health": ["oura", "apple_health"],
+            "stocks": ["stocks"],
             "world": ["weather", "hackernews", "news_rss"],
             "music": ["spotify", "apple_music"],
             "social": ["linkedin", "instagram", "facebook"],

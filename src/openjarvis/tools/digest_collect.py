@@ -35,6 +35,7 @@ _SECTION_ORDER: List[tuple] = [
         },
     ),
     ("CALENDAR", {"gcalendar", "apple_calendar"}),
+    ("STOCKS", {"stocks"}),
     ("WORLD", {"weather", "hackernews", "news_rss"}),
     ("MUSIC", {"spotify", "apple_music"}),
     ("SOCIAL", {"facebook", "instagram", "linkedin"}),
@@ -358,6 +359,11 @@ def _format_github_notifications(doc: Document) -> str:
     return f"[github] {title}{repo_str}{reason_str} ({ago})"
 
 
+def _format_stocks(doc: Document) -> str:
+    """Format a stock quote document."""
+    return f"[stocks] {doc.title}"
+
+
 def _format_hackernews(doc: Document) -> str:
     """Format a Hacker News story."""
     score = doc.metadata.get("score", "?")
@@ -453,6 +459,7 @@ _FORMATTERS: Dict[str, Any] = {
     "apple_calendar": _format_apple_calendar,
     "weather": _format_weather,
     "github_notifications": _format_github_notifications,
+    "stocks": _format_stocks,
     "hackernews": _format_hackernews,
     "news_rss": _format_news_rss,
     "spotify": _format_spotify,
@@ -503,7 +510,41 @@ _IMPORTANCE_KEYWORDS = re.compile(
 _SKIP_SENDERS = re.compile(
     r"noreply|no-reply|notifications?@|mailer-daemon|newsletters?@"
     r"|marketing@|promo(tions)?@|updates?@|digest@|info@|support@"
-    r"|donotreply|automated@|notification@|news@",
+    r"|donotreply|automated@|notification@|news@|deals@|offers@"
+    r"|rewards@|receipts?@|orders?@|shipping@|delivery@|confirm",
+    re.IGNORECASE,
+)
+
+# Specific brands whose emails are never relevant to a daily briefing
+_JUNK_BRANDS = re.compile(
+    r"sezzle|domino'?s|pizza\s*hut|papa\s*john'?s|little\s*caesars"
+    r"|uber\s*eats|doordash|grubhub|postmates|instacart"
+    r"|groupon|retailmenot|slickdeals|woot"
+    r"|starbucks|chipotle|chick-fil-a|mcdonald'?s|wendy'?s|taco\s*bell|subway"
+    r"|target\.com|walmart|bestbuy|best\s*buy|kohls|kohl'?s|macy'?s|old\s*navy"
+    r"|nike\.com|adidas|foot\s*locker|shein|temu"
+    r"|affirm|klarna|afterpay|zip\s*pay"
+    r"|mint\.com|credit\s*karma|nerdwallet"
+    r"|spotify|netflix|hulu|disney\+?|paramount|peacock"
+    r"|cash\s*app|venmo\.com|zelle"
+    r"|lyft|uber(?![\w])|fandango|ticketmaster|stubhub"
+    r"|bed\s*bath|wayfair|etsy\.com|ebay\.com"
+    r"|unsubscribe.*click|view\s+in\s+browser",
+    re.IGNORECASE,
+)
+
+# Google Calendar IDs for birthday/holiday calendars to skip
+_BIRTHDAY_CALENDAR_IDS = re.compile(
+    r"addressbook#contacts@group\.v\.calendar\.google\.com"
+    r"|contacts@group\.v\.calendar\.google\.com"
+    r"|#contacts@group"
+    r"|en\.usa#holiday@group\.v\.calendar\.google\.com"
+    r"|holiday@group",
+    re.IGNORECASE,
+)
+
+_BIRTHDAY_TITLES = re.compile(
+    r"'s\s+birthday$|birthday\s*-\s|^birthday:|'s\s+bday$",
     re.IGNORECASE,
 )
 
@@ -732,9 +773,24 @@ class DigestCollectTool(BaseTool):
                 if unacted_only and source == "gcalendar":
                     docs = _filter_pending_invites(docs)
 
+                # Filter Google Calendar birthday/holiday events
+                if source == "gcalendar":
+                    docs = [
+                        d for d in docs
+                        if not _BIRTHDAY_CALENDAR_IDS.search(d.metadata.get("calendar_id", ""))
+                        and not _BIRTHDAY_TITLES.search(d.title or "")
+                    ]
+
                 # Always triage Gmail threads: detect replies, rank importance
-                if source == "gmail":
+                if source in ("gmail", "gmail_syntra", "gmail_imap"):
                     docs = _triage_email_threads(docs)
+                    # Drop junk brand emails entirely
+                    docs = [
+                        d for d in docs
+                        if not _JUNK_BRANDS.search(
+                            f"{d.author or ''} {d.title or ''} {(d.content or '')[:300]}"
+                        )
+                    ]
 
                 collected_docs[source] = docs
             except Exception as exc:

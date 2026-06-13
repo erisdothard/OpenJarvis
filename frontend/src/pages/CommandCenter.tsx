@@ -543,11 +543,15 @@ export function CommandCenter() {
                     )}
                   </h3>
                   <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                    {briefing.status === 'speaking' ? (
-                      <button className="pt-briefing-ctrl pt-stop-ctrl" onClick={interruptBriefing}><VolumeX size={10} /> Stop</button>
-                    ) : briefing.text && briefing.status === 'ready' ? (
-                      <button className="pt-briefing-ctrl" onClick={playBriefing} style={{ color: '#3df2dd' }}><Play size={10} /> Play</button>
-                    ) : null}
+                    {briefing.text && (briefing.status === 'speaking' || briefing.status === 'ready') && (
+                      <button
+                        className={`pt-briefing-ctrl ${briefing.status === 'speaking' ? 'pt-stop-ctrl' : ''}`}
+                        onClick={briefing.status === 'speaking' ? interruptBriefing : playBriefing}
+                        style={{ color: briefing.status === 'speaking' ? undefined : '#3df2dd' }}
+                      >
+                        {briefing.status === 'speaking' ? <><Square size={10} /> Stop</> : <><Play size={10} /> Play</>}
+                      </button>
+                    )}
                     <button
                       className="pt-briefing-ctrl"
                       onClick={refreshBriefing}
