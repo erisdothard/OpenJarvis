@@ -1,0 +1,6 @@
+{
+  "buildCommand": "cd frontend && npm install && npx vite build --outDir ../dist",
+  "outputDirectory": "dist",
+  "framework": null,
+  "installCommand": "cd frontend && npm install"
+}
