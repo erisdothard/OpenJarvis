@@ -131,7 +131,7 @@ def _extract_json_block(text: str) -> Optional[List[Dict[str, Any]]]:
 
 @AgentRegistry.register("checkin")
 class CheckinAgent(ToolUsingAgent):
-    """Sends a daily check-in iMessage and routes the reply to the right tools."""
+    """Sends a daily check-in via Telegram and routes the reply to the right tools."""
 
     agent_id = "checkin"
 
@@ -201,15 +201,15 @@ class CheckinAgent(ToolUsingAgent):
         from openjarvis.channels.imessage_daemon import (
             _get_max_rowid,
             poll_new_messages,
-            send_imessage,
         )
+        from openjarvis.notifications import send_telegram
 
         # --- Phase 1: Send check-in greeting ---
         baseline_rowid = _get_max_rowid(_DB_PATH)
-        sent = send_imessage(self._phone, _CHECKIN_GREETING)
+        sent = send_telegram(_CHECKIN_GREETING)
         if not sent:
             self._emit_turn_end(turns=1)
-            return AgentResult(content="Failed to send check-in iMessage.", turns=1)
+            return AgentResult(content="Failed to send check-in notification.", turns=1)
 
         logger.info(
             "Check-in sent to %s, polling for reply (timeout: %d min)",
@@ -223,7 +223,7 @@ class CheckinAgent(ToolUsingAgent):
         )
 
         if not reply_text:
-            send_imessage(self._phone, _NO_REPLY_ACK)
+            send_telegram(_NO_REPLY_ACK)
             self._emit_turn_end(turns=1)
             return AgentResult(content="No reply received within timeout.", turns=1)
 
@@ -232,7 +232,7 @@ class CheckinAgent(ToolUsingAgent):
         # --- Phase 3: Classify via LLM ---
         classified = self._classify_updates(reply_text)
         if not classified:
-            send_imessage(self._phone, _EMPTY_UPDATE_ACK)
+            send_telegram(_EMPTY_UPDATE_ACK)
             self._emit_turn_end(turns=1)
             return AgentResult(content="Reply contained no actionable updates.", turns=1)
 
@@ -249,12 +249,12 @@ class CheckinAgent(ToolUsingAgent):
 
         # --- Phase 5: Confirm ---
         confirmation = self._build_confirmation(results, clarifications)
-        send_imessage(self._phone, confirmation)
+        send_telegram(confirmation)
 
         # --- Phase 6: Handle clarifications (one round) ---
         if clarifications:
             follow_up_results = self._handle_clarifications(
-                clarifications, baseline_rowid, poll_new_messages, send_imessage
+                clarifications, baseline_rowid, poll_new_messages, send_telegram
             )
             results.extend(follow_up_results)
 
@@ -431,7 +431,7 @@ class CheckinAgent(ToolUsingAgent):
         results: List[Dict[str, Any]],
         clarifications: List[Dict[str, Any]],
     ) -> str:
-        """Build the iMessage confirmation summary."""
+        """Build the confirmation summary."""
         lines: List[str] = []
 
         successes = [r for r in results if r.get("success")]

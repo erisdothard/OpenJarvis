@@ -1,4 +1,4 @@
-"""Gmail Pub/Sub push listener — real-time email alerting via iMessage.
+"""Gmail Pub/Sub push listener — real-time email alerting via Telegram.
 
 Uses Google Cloud Pub/Sub streaming pull to receive Gmail push
 notifications, fetches new messages via history.list, and sends
@@ -422,13 +422,13 @@ def _check_importance(
 
 
 def _send_email_alert(phone: str, subject: str, sender: str) -> None:
-    """Send an iMessage alert for an important email."""
+    """Send a Telegram alert for an important email."""
     try:
-        from openjarvis.channels.imessage_daemon import send_imessage
+        from openjarvis.notifications import send_telegram
 
         clean_sender = sender.split("<")[0].strip().strip('"')
-        message = f"JARVIS — Email\n\n{subject}\nFrom: {clean_sender}"
-        send_imessage(phone, message)
+        message = f"Jarvis: Email\n\n{subject}\nFrom: {clean_sender}"
+        send_telegram(message)
         logger.info("Email alert sent: %s", subject[:60])
     except Exception as exc:
         logger.error("Failed to send email alert: %s", exc)

@@ -39,7 +39,6 @@ _CHANNEL_MODULES = [
     "twitch_channel",
     "twitter_channel",
     "nostr_channel",
-    "twilio_sms",
     "sendblue",
     "gmail",
 ]

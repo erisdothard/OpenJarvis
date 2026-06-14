@@ -207,18 +207,18 @@ def _build_notification_channel(channel_spec: str) -> Optional[Any]:
 
     channel_type, _, channel_id = channel_spec.partition(":")
 
-    # iMessage: wrap send_imessage() in a minimal BaseChannel-compatible shim
-    if channel_type == "imessage":
+    # Telegram: wrap send_telegram() in a minimal BaseChannel-compatible shim
+    if channel_type in ("imessage", "telegram"):
         from openjarvis.channels._stubs import (
             BaseChannel,
             ChannelStatus,
         )
 
-        class _IMessageShim(BaseChannel):
-            channel_id = "imessage"
+        class _TelegramShim(BaseChannel):
+            channel_id = "telegram"
 
-            def __init__(self, handle: str) -> None:
-                self._handle = handle
+            def __init__(self, chat_id: str) -> None:
+                self._chat_id = chat_id
 
             def connect(self) -> None:
                 pass
@@ -229,20 +229,20 @@ def _build_notification_channel(channel_spec: str) -> Optional[Any]:
             def send(
                 self, channel: str, content: str, *, conversation_id: str = ""
             ) -> bool:
-                from openjarvis.channels.imessage_daemon import send_imessage
+                from openjarvis.notifications import send_telegram
 
-                return send_imessage(self._handle, content)
+                return send_telegram(content, chat_id=self._chat_id)
 
             def status(self) -> ChannelStatus:
                 return ChannelStatus.CONNECTED
 
             def list_channels(self) -> List[str]:
-                return [self._handle]
+                return [self._chat_id]
 
             def on_message(self, handler: Any) -> None:
                 pass
 
-        return _IMessageShim(channel_id)
+        return _TelegramShim(channel_id)
 
     # All other channel types: look up in ChannelRegistry
     try:

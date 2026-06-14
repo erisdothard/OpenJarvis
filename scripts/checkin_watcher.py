@@ -136,9 +136,9 @@ def main() -> None:
     # Classify
     classified = agent._classify_updates(reply_text)
     if not classified:
-        from openjarvis.channels.imessage_daemon import send_imessage
+        from openjarvis.notifications import send_telegram
 
-        send_imessage(phone, "Got it \u2014 all clear. Let me know if anything comes up.")
+        send_telegram("Got it \u2014 all clear. Let me know if anything comes up.")
         logger.info("No actionable updates in reply.")
         return
 
@@ -158,13 +158,13 @@ def main() -> None:
     # Confirm
     confirmation = CheckinAgent._build_confirmation(results, clarifications)
 
-    from openjarvis.channels.imessage_daemon import send_imessage
+    from openjarvis.notifications import send_telegram
 
-    sent = send_imessage(phone, confirmation)
+    sent = send_telegram(confirmation)
     if sent:
         logger.info("Confirmation sent.")
     else:
-        logger.error("Failed to send confirmation iMessage.")
+        logger.error("Failed to send confirmation via Telegram.")
 
     logger.info(
         "Done: %d processed, %d need clarification.",

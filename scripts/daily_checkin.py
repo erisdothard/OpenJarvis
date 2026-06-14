@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Phase 1: Send the daily check-in iMessage.
+"""Phase 1: Send the daily check-in via Telegram.
 
-Fires at 4 PM via launchd. Sends ONE iMessage, writes a state file, exits.
+Fires at 4 PM via launchd. Sends ONE Telegram message, writes a state file, exits.
 Takes ~5 seconds. No polling, no blocking.
 
 State file (~/.openjarvis/checkin_state.json) tells the reply watcher
@@ -93,11 +93,11 @@ def main() -> None:
     baseline = _get_max_rowid()
 
     # Send the greeting
-    from openjarvis.channels.imessage_daemon import send_imessage
+    from openjarvis.notifications import send_telegram
 
-    sent = send_imessage(phone, GREETING)
+    sent = send_telegram(GREETING)
     if not sent:
-        logger.error("Failed to send iMessage to %s", phone)
+        logger.error("Failed to send Telegram notification")
         return
 
     # Write state for the reply watcher

@@ -465,10 +465,11 @@ def _exec_sms_send(payload: Dict[str, Any]) -> Tuple[bool, str]:
     if not contact or not body:
         return False, "Missing contact or body in payload"
     try:
-        from openjarvis.channels.imessage_daemon import send_imessage
+        from openjarvis.notifications import send_telegram
 
-        send_imessage(contact, body)
-        return True, f"Sent iMessage to {contact}"
+        msg = f"Jarvis: Message for {contact}\n\n{body}"
+        send_telegram(msg)
+        return True, f"Sent notification about message to {contact}"
     except Exception as exc:
         return False, str(exc)
 

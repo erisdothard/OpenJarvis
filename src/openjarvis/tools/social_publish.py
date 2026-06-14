@@ -2,7 +2,7 @@
 
 Orchestrates LinkedIn, Instagram, Facebook, and Twitter/X connectors
 to publish content from a single tool call.  Supports optional scheduling
-via a simple SQLite-backed queue with iMessage approval before publishing.
+via a simple SQLite-backed queue with Telegram approval before publishing.
 """
 
 from __future__ import annotations
@@ -62,17 +62,14 @@ def _ensure_schedule_db() -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------
-# iMessage notification helpers
+# Telegram notification helpers
 # ---------------------------------------------------------------------------
 
 def _send_text(message: str) -> bool:
-    """Send an iMessage to the default phone number."""
-    try:
-        from openjarvis.channels.imessage_daemon import send_imessage
-        return send_imessage(_DEFAULT_PHONE, message)
-    except ImportError:
-        _log.error("imessage_daemon not available — cannot send approval text")
-        return False
+    """Send a Telegram notification."""
+    from openjarvis.notifications import send_telegram
+
+    return send_telegram(message)
 
 
 def _get_server_port() -> int:
@@ -87,7 +84,7 @@ def _get_server_port() -> int:
 def _send_approval_text(
     platforms: List[str], content: str, approval_id: str,
 ) -> None:
-    """Text Eris a post preview and ask for approval."""
+    """Send Eris a post preview and ask for approval via Telegram."""
     platform_str = ", ".join(p.title() for p in platforms)
     preview = content[:500]
     port = _get_server_port()
@@ -99,7 +96,7 @@ def _send_approval_text(
         f"Tap to approve/deny:\n{approve_url}"
     )
     if not _send_text(message):
-        _log.warning("Failed to send approval iMessage for %s", approval_id)
+        _log.warning("Failed to send approval notification for %s", approval_id)
 
 
 def _send_confirmation_text(
@@ -108,7 +105,7 @@ def _send_confirmation_text(
     published: List[Dict[str, Any]],
     failed: List[Dict[str, Any]],
 ) -> None:
-    """Text Eris the publish result."""
+    """Notify Eris of the publish result via Telegram."""
     if status == "published":
         names = ", ".join(p.title() for p in platforms)
         _send_text(f"JARVIS — Posted to {names} successfully!")
@@ -122,7 +119,7 @@ def _send_confirmation_text(
 
 
 def _send_denial_text(platforms: List[str]) -> None:
-    """Text Eris that the post was cancelled."""
+    """Notify Eris that the post was cancelled via Telegram."""
     names = ", ".join(p.title() for p in platforms)
     _send_text(f"JARVIS — Post to {names} cancelled.")
 
@@ -437,7 +434,7 @@ class SocialSchedulePostTool(BaseTool):
             name="social_schedule_post",
             description=(
                 "Schedule a post for publishing at a specific time. When the time "
-                "arrives, Jarvis will text you the post for approval via iMessage. "
+                "arrives, Jarvis will send you the post for approval via Telegram. "
                 "The post only publishes after you approve it."
             ),
             parameters={
@@ -523,7 +520,7 @@ class SocialSchedulePostTool(BaseTool):
             content=(
                 f"Post #{post_id} scheduled for {schedule_time} on {platform_str}.\n\n"
                 f"**Content preview:**\n{content[:200]}...\n\n"
-                f"At {schedule_time}, Jarvis will text you for approval before publishing."
+                f"At {schedule_time}, Jarvis will notify you via Telegram for approval before publishing."
             ),
             success=True,
             metadata={
@@ -544,11 +541,11 @@ def run_social_scheduler() -> None:
     Called every 60s from a daemon thread in serve.py.
 
     Phase 1 — "scheduled" posts whose schedule_time arrived:
-        Create a PendingAction in ApprovalStore → send iMessage → set "awaiting_approval"
+        Create a PendingAction in ApprovalStore → send Telegram notification → set "awaiting_approval"
 
     Phase 2 — "awaiting_approval" posts:
-        Check ApprovalStore → if approved → publish → text confirmation
-                            → if denied  → cancel  → text confirmation
+        Check ApprovalStore → if approved → publish → Telegram confirmation
+                            → if denied  → cancel  → Telegram confirmation
                             → if expired → mark expired
     """
     if not _SCHEDULE_DB.exists():
@@ -601,7 +598,7 @@ def run_social_scheduler() -> None:
             conn.commit()
 
             _log.info(
-                "Post #%d: approval requested via iMessage (action %s)",
+                "Post #%d: approval requested via Telegram (action %s)",
                 post_id,
                 action.id,
             )

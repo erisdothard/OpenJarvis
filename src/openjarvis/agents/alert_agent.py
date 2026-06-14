@@ -251,13 +251,10 @@ def _format_alert_message(items: List[Dict[str, Any]]) -> str:
 # ── iMessage sender ─────────────────────────────────────────────────────────
 
 def _send_text(phone: str, message: str) -> bool:
-    """Send an iMessage. Reuses the existing daemon helper."""
-    try:
-        from openjarvis.channels.imessage_daemon import send_imessage
-        return send_imessage(phone, message)
-    except ImportError:
-        logger.error("imessage_daemon not available")
-        return False
+    """Send a notification via Telegram."""
+    from openjarvis.notifications import send_telegram
+
+    return send_telegram(message)
 
 
 # ── Main loop ───────────────────────────────────────────────────────────────

@@ -658,7 +658,7 @@ def serve(
                             "model": model_name,
                             "schedule_type": "cron",
                             "schedule_value": config.checkin.schedule,
-                            "phone": config.checkin.phone,
+                            "channel": config.checkin.channel,
                             "timezone": config.checkin.timezone,
                             "reply_timeout_minutes": config.checkin.reply_timeout_minutes,
                         },
@@ -683,12 +683,15 @@ def serve(
             logger.debug("Agent scheduler init failed: %s", exc)
 
     # Start reminder/calendar notifier (texts you when items are due)
-    if getattr(config, "checkin", None) and getattr(config.checkin, "phone", ""):
+    # Start reminder/calendar notifier (Telegram)
+    _tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    _tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if _tg_chat_id and _tg_token:
         try:
             from openjarvis.agents.reminder_notifier import start_notifier
 
-            start_notifier(config.checkin.phone)
-            console.print("  Notifier:  [cyan]active (reminders + calendar)[/cyan]")
+            start_notifier(_tg_chat_id)
+            console.print("  Notifier:  [cyan]active (Telegram)[/cyan]")
         except Exception as exc:
             logger.debug("Reminder notifier init failed: %s", exc)
 
@@ -846,7 +849,6 @@ def serve(
         logger.info("Credentials loaded — %s", ", ".join(_cred_parts))
 
     webhook_config = {
-        "twilio_auth_token": _os.environ.get("TWILIO_AUTH_TOKEN", ""),
         "bluebubbles_password": _os.environ.get("BLUEBUBBLES_PASSWORD", ""),
         "whatsapp_verify_token": _os.environ.get("WHATSAPP_VERIFY_TOKEN", ""),
         "whatsapp_app_secret": _os.environ.get("WHATSAPP_APP_SECRET", ""),
@@ -916,12 +918,11 @@ def serve(
             "authenticated requests to your instance."
         )
 
-    # --- Alerts: event-driven via /api/alert endpoint ---
-    # Calendar/reminder alerts: launchd → event_watcher.py → POST /api/alert
+    # --- Alerts: event-driven via Telegram ---
+    # Calendar/reminder alerts: reminder_notifier.py (in-process thread)
     # Email alerts: Gmail Pub/Sub → gmail_push.py (started in app.py lifespan)
     if config.alerts.enabled:
-        phone = config.alerts.phone or "+16152439891"
-        console.print(f"  Alerts:    [cyan]iMessage → {phone}[/cyan] (event-driven)")
+        console.print(f"  Alerts:    [cyan]Telegram[/cyan] (event-driven)")
 
     import uvicorn
 

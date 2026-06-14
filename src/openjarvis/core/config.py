@@ -1050,10 +1050,10 @@ class GmailPushConfig:
 
 @dataclass(slots=True)
 class AlertsConfig:
-    """Event-driven iMessage alert system settings."""
+    """Event-driven alert system settings (Telegram)."""
 
     enabled: bool = True
-    phone: str = "+16152439891"
+    channel: str = "telegram"  # notification backend
     gmail_push: GmailPushConfig = field(default_factory=GmailPushConfig)
 
 
@@ -1066,18 +1066,18 @@ class ProactiveConfig:
     hours_back: int = 24  # how many hours of unacted items to scan
     timezone: str = "America/Los_Angeles"
     # Channel to send approval notifications and receive yes/no replies.
-    # Format: "{type}:{id}", e.g. "imessage:+15551234567" or "telegram:123456789"
-    notification_channel: str = ""
+    # Format: "{type}:{id}", e.g. "telegram:123456789"
+    notification_channel: str = "telegram"
 
 
 @dataclass(slots=True)
 class CheckinConfig:
-    """Daily check-in — Jarvis texts asking for updates, routes replies."""
+    """Daily check-in — Jarvis sends a Telegram prompt asking for updates."""
 
     enabled: bool = False
     schedule: str = "0 16 * * *"  # cron expression (default: 4pm daily)
     timezone: str = "America/Chicago"
-    phone: str = "+16152439891"  # iMessage recipient (E.164)
+    channel: str = "telegram"  # notification backend
     reply_timeout_minutes: int = 60  # how long to wait for a reply
 
 

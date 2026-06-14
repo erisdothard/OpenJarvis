@@ -290,14 +290,18 @@ def _run_applescript(script: str, *, timeout: float = 30.0) -> subprocess.Comple
 
 
 # ---------------------------------------------------------------------------
-# Message sender (iMessage via AppleScript)
+# Message sender (Telegram Bot API)
 # ---------------------------------------------------------------------------
 
 
 def _send_message(to: str, body: str) -> bool:
-    """Send a notification via iMessage."""
-    from openjarvis.channels.imessage_daemon import send_imessage
-    return send_imessage(to, body)
+    """Send a notification via Telegram.
+
+    ``to`` is the Telegram chat ID (numeric string).
+    """
+    from openjarvis.notifications import send_telegram
+
+    return send_telegram(body, chat_id=to)
 
 
 # ---------------------------------------------------------------------------

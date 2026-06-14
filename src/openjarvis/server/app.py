@@ -326,14 +326,6 @@ def create_app(
     app.include_router(glance_router)
     app.include_router(voice_ws_router)
 
-    # Event-driven alert endpoint
-    try:
-        from openjarvis.server.alert_routes import alert_router
-
-        app.include_router(alert_router)
-    except Exception as exc:
-        logger.debug("Alert routes init skipped: %s", exc)
-
     include_all_routes(app)
 
     # Desktop alerting on agent failures
@@ -376,7 +368,6 @@ def create_app(
 
             webhook_router = create_webhook_router(
                 bridge=channel_bridge,
-                twilio_auth_token=webhook_config.get("twilio_auth_token", ""),
                 bluebubbles_password=webhook_config.get("bluebubbles_password", ""),
                 whatsapp_verify_token=webhook_config.get("whatsapp_verify_token", ""),
                 whatsapp_app_secret=webhook_config.get("whatsapp_app_secret", ""),
@@ -409,7 +400,7 @@ def create_app(
                 start_gmail_listener(
                     gcp_project=gp.gcp_project,
                     subscription=gp.subscription,
-                    phone=cfg.alerts.phone,
+                    phone="telegram",  # notifications route through Telegram
                     important_senders=gp.important_senders,
                     service_account_path=sa_path or None,
                 )
